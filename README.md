@@ -1,6 +1,6 @@
 # SIGM — Sistema Integral de Gestión de Mantenimiento
 
-Aplicación web institucional para gestionar el **mantenimiento preventivo y correctivo de los equipos de cómputo y sistemas** de una IPS colombiana: inventario técnico, plan maestro, cronograma anual versionado, órdenes de trabajo, reportes de falla, hojas de vida, proveedores, documentos, indicadores y auditoría.
+Aplicación web institucional para gestionar el **mantenimiento preventivo y correctivo de los equipos de cómputo, sistemas e infraestructura (climatización)** de una IPS colombiana: inventario técnico, plan maestro, cronograma anual versionado, órdenes de trabajo, reportes de falla, hojas de vida, proveedores, documentos, indicadores y auditoría.
 
 > **Alcance:** computadores, servidores y almacenamiento, redes y comunicaciones, impresión y periféricos, telefonía, UPS de TI y sistemas de información/software. Las categorías son configurables dentro de este alcance.
 

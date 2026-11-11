@@ -86,13 +86,25 @@ export class InstitutionalPdf {
     // Título
     d.setTextColor(20);
     d.setFont('helvetica', 'bold');
-    d.setFontSize(12.5);
     const cx = m + left + (w - left - right) / 2;
-    d.text(this.header.title, cx, m + 11, { align: 'center' });
+    const titleW = w - left - right - 8;
+    // El título se ajusta al recuadro central (máx. 2 líneas, reduciendo la fuente si hace falta)
+    let size = 12.5;
+    d.setFontSize(size);
+    let titleLines: string[] = d.splitTextToSize(this.header.title, titleW);
+    while (titleLines.length > 2 && size > 8) {
+      size -= 0.5;
+      d.setFontSize(size);
+      titleLines = d.splitTextToSize(this.header.title, titleW);
+    }
+    const lineH = size * 0.42;
+    const titleY = titleLines.length > 1 ? m + 8 : m + 11;
+    d.text(titleLines.slice(0, 2), cx, titleY, { align: 'center' });
     if (this.header.subtitle) {
       d.setFont('helvetica', 'normal');
-      d.setFontSize(9.5);
-      d.text(d.splitTextToSize(this.header.subtitle, w - left - right - 6), cx, m + 18, { align: 'center' });
+      d.setFontSize(9);
+      const subY = titleY + lineH * Math.min(titleLines.length, 2) + 3;
+      d.text(d.splitTextToSize(this.header.subtitle, titleW).slice(0, 2), cx, subY, { align: 'center' });
     }
     // Control documental
     d.setFontSize(7.5);

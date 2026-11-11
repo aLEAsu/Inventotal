@@ -53,7 +53,7 @@ async function logout() {
           <div class="binst" :title="cat.institution">{{ cat.institution }}</div>
         </div>
       </div>
-      <div class="scope">Mantenimiento de equipos de cómputo y sistemas</div>
+      <div class="scope">Mantenimiento de equipos de cómputo, sistemas e infraestructura</div>
       <nav>
         <RouterLink v-for="i in items" :key="i.to" :to="i.to" class="nav" :class="{ active: isActive(i.to) }">
           <component :is="i.icon" :size="18" :stroke-width="1.8" />

@@ -19,7 +19,9 @@
     "lint": "tsc --noEmit -p tsconfig.json",
     "build:tools": "tsc -p tsconfig.tools.json",
     "seed:prod": "node dist-tools/prisma/seed.js",
-    "create-admin:prod": "node dist-tools/scripts/create-admin.js"
+    "create-admin:prod": "node dist-tools/scripts/create-admin.js",
+    "import:inventory": "ts-node scripts/import-inventory.ts",
+    "import:inventory:prod": "node dist-tools/scripts/import-inventory.js"
   },
   "engines": {
     "node": ">=24"

@@ -146,7 +146,7 @@ const titles: Record<Kind, string> = { areas: 'Área', locations: 'Ubicación', 
             </div>
           </TabPanel>
           <TabPanel value="categories">
-            <Message severity="info" :closable="false" class="mb">El sistema está enfocado en equipos de cómputo y sistemas. Puede agregar categorías dentro de ese alcance.</Message>
+            <Message severity="info" :closable="false" class="mb">El sistema está enfocado en equipos de cómputo, sistemas e infraestructura (climatización). Puede agregar categorías dentro de ese alcance.</Message>
             <div class="grid g2">
               <div>
                 <div class="card-title"><h3>Categorías</h3><Button label="Nueva" icon="pi pi-plus" size="small" text @click="openCat('categories')" /></div>

@@ -1,6 +1,6 @@
 /**
  * Datos base de configuración (NO son datos de demostración).
- * ALCANCE: el sistema gestiona el mantenimiento de EQUIPOS DE CÓMPUTO Y SISTEMAS (TI).
+ * ALCANCE: equipos de cómputo, sistemas (TI) e infraestructura de climatización (aires acondicionados).
  * Las ponderaciones y textos son PUNTOS DE PARTIDA configurables: deben ser validados por la
  * coordinación de sistemas / mantenimiento y la normativa colombiana vigente.
  */
@@ -8,9 +8,11 @@ export const CATEGORIES = [
   { code: 'CMP', name: 'Equipos de cómputo', color: '#1d4ed8', description: 'Computadores de escritorio, portátiles y estaciones de trabajo', subs: ['Escritorio', 'Portátil', 'Todo en uno', 'Estación de trabajo', 'Tableta'] },
   { code: 'SRV', name: 'Servidores y almacenamiento', color: '#4338ca', description: 'Servidores físicos y virtuales, almacenamiento y respaldo de datos', subs: ['Servidor físico', 'Servidor virtual', 'Almacenamiento (NAS/SAN)', 'Unidad de respaldo'] },
   { code: 'RED', name: 'Redes y comunicaciones', color: '#0e7490', description: 'Equipos activos de red y cableado estructurado', subs: ['Switch', 'Router', 'Firewall', 'Punto de acceso inalámbrico', 'Cableado estructurado', 'Rack / gabinete'] },
-  { code: 'PER', name: 'Impresión y periféricos', color: '#7c3aed', description: 'Impresoras, escáneres, monitores y periféricos', subs: ['Impresora', 'Impresora de etiquetas', 'Escáner', 'Lector de código de barras', 'Monitor', 'Videoproyector'] },
+  { code: 'PER', name: 'Impresión y periféricos', color: '#7c3aed', description: 'Impresoras, escáneres, monitores y periféricos', subs: ['Impresora', 'Impresora de etiquetas', 'Escáner', 'Lector de código de barras', 'Lector biométrico', 'Monitor', 'Televisor / pantalla', 'Videoproyector', 'Mouse', 'Teclado'] },
   { code: 'TEL', name: 'Telefonía y comunicaciones unificadas', color: '#0f766e', description: 'Telefonía IP, centrales y equipos de comunicación', subs: ['Teléfono IP', 'Central telefónica', 'Diadema / audio', 'Videoconferencia'] },
-  { code: 'UPS', name: 'Respaldo eléctrico de TI', color: '#b45309', description: 'UPS y reguladores que protegen equipos de cómputo', subs: ['UPS', 'Regulador de voltaje', 'PDU'] },
+  { code: 'UPS', name: 'Respaldo eléctrico de TI', color: '#b45309', description: 'UPS y reguladores que protegen equipos de cómputo', subs: ['UPS', 'Regulador de voltaje', 'PDU', 'Multitoma'] },
+  { code: 'MOV', name: 'Dispositivos móviles', color: '#be185d', description: 'Celulares y tabletas institucionales', subs: ['Celular', 'Tableta'] },
+  { code: 'AAC', name: 'Climatización (aire acondicionado)', color: '#0369a1', description: 'Infraestructura: aires acondicionados y equipos de climatización', subs: ['Mini split', 'Aire central', 'Ventilación / extracción'] },
   { code: 'SIS', name: 'Sistemas de información y software', color: '#374151', description: 'Aplicaciones, bases de datos, licencias y plataformas', subs: ['Sistema de información clínico', 'Sistema administrativo / ERP', 'Base de datos', 'Sistema operativo / licencias', 'Antivirus / seguridad', 'Copias de seguridad'] },
 ];
 
@@ -24,8 +26,8 @@ export const CRITERIA = [
 ];
 
 export const FORMATS = [
-  ['F-01', 'Inventario general de equipos de cómputo y sistemas'],
-  ['F-02', 'Plan maestro anual de mantenimiento de equipos de cómputo y sistemas'],
+  ['F-01', 'Inventario general de equipos de cómputo, sistemas e infraestructura'],
+  ['F-02', 'Plan maestro anual de mantenimiento'],
   ['F-03', 'Orden de trabajo'],
   ['F-04', 'Registro de mantenimiento preventivo'],
   ['F-05', 'Registro de mantenimiento correctivo'],
