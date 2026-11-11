@@ -1,0 +1,6 @@
+.env
+backups/
+infra/certs/*
+!infra/certs/.gitkeep
+server.log
+.claude/settings.local.json

@@ -1,0 +1,89 @@
+/* SIGM — estilos base sobrios para entorno institucional de salud */
+:root {
+  --app-bg: #f4f6f9;
+  --app-surface: #ffffff;
+  --app-border: #e2e8f0;
+  --app-text: #1e293b;
+  --app-muted: #64748b;
+  --app-sidebar: #0f2a3d;
+  --app-sidebar-text: #cbd5e1;
+  --app-sidebar-active: #ffffff;
+  --app-radius: 10px;
+  --sidebar-w: 248px;
+  font-family: 'Segoe UI', system-ui, -apple-system, Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-size: 14px;
+  color: var(--app-text);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--app-bg); }
+a { color: var(--p-primary-700); text-decoration: none; }
+a:hover { text-decoration: underline; }
+h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+h1 { font-size: 1.35rem; }
+h2 { font-size: 1.08rem; }
+h3 { font-size: 0.98rem; }
+
+.page { padding: 20px 24px 40px; max-width: 1600px; margin: 0 auto; }
+.page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.page-head .sub { color: var(--app-muted); margin-top: 4px; font-size: 0.92rem; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+.card { background: var(--app-surface); border: 1px solid var(--app-border); border-radius: var(--app-radius); padding: 16px; }
+.card + .card { margin-top: 14px; }
+.grid > .card + .card { margin-top: 0; }
+.grid > .card { margin-top: 0; }
+.card-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+
+.grid { display: grid; gap: 14px; }
+.g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.g3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 1100px) { .g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .g3 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 700px) { .g2, .g3, .g4 { grid-template-columns: 1fr; } .page { padding: 14px 12px 32px; } }
+
+.filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+.filters > * { min-width: 170px; }
+
+.form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
+.form.cols3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.form .full { grid-column: 1 / -1; }
+.field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.field label { font-size: 0.85rem; font-weight: 600; color: #334155; }
+.field label .req { color: #b91c1c; }
+.field small { color: var(--app-muted); font-size: 0.78rem; }
+.field .p-inputtext, .field .p-select, .field .p-datepicker, .field .p-inputnumber, .field .p-textarea, .field .p-multiselect { width: 100%; }
+@media (max-width: 760px) { .form, .form.cols3 { grid-template-columns: 1fr; } }
+
+.kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px 18px; }
+.kv > div { display: flex; flex-direction: column; gap: 2px; }
+.kv dt { font-size: 0.76rem; color: var(--app-muted); text-transform: uppercase; letter-spacing: 0.03em; }
+.kv dd { margin: 0; font-weight: 500; word-break: break-word; }
+
+.kpi { display: flex; flex-direction: column; gap: 6px; }
+.kpi .v { font-size: 1.7rem; font-weight: 650; line-height: 1.1; }
+.kpi .l { color: var(--app-muted); font-size: 0.85rem; }
+.kpi .h { font-size: 0.78rem; color: var(--app-muted); }
+.kpi.danger .v { color: #b91c1c; }
+.kpi.warn .v { color: #b45309; }
+.kpi.ok .v { color: #15803d; }
+
+.muted { color: var(--app-muted); }
+.mono { font-family: Consolas, 'Courier New', monospace; font-size: 0.88em; }
+.nowrap { white-space: nowrap; }
+.right { text-align: right; }
+.mt { margin-top: 14px; }
+.mb { margin-bottom: 14px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.spacer { flex: 1; }
+.pre { white-space: pre-wrap; }
+.insufficient { color: var(--app-muted); font-style: italic; font-size: 0.85rem; }
+.banner-urgent { border-left: 4px solid #b91c1c; background: #fef2f2; }
+.p-datatable .p-datatable-tbody > tr > td { padding: 0.55rem 0.7rem; }
+.p-datatable .p-datatable-thead > tr > th { padding: 0.6rem 0.7rem; font-size: 0.82rem; background: #f8fafc; }
+.clickable { cursor: pointer; }
+.p-chart { position: relative; height: 100%; width: 100%; }
+.empty { padding: 26px; text-align: center; color: var(--app-muted); }
+
+@media print {
+  .no-print { display: none !important; }
+}

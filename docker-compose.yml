@@ -1,0 +1,90 @@
+# SIGM — despliegue local / red interna de la clínica
+#   cp .env.example .env   (y defina contraseñas fuertes)
+#   docker compose up -d --build
+#   docker compose exec api npm run create-admin
+name: sigm
+
+services:
+  db:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sigm}
+      POSTGRES_USER: ${POSTGRES_USER:-sigm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD en .env}
+      TZ: America/Bogota
+      PGTZ: America/Bogota
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sigm}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-sigm}?schema=public
+      STORAGE_DIR: /data/storage
+      COOKIE_SECURE: "true"
+      SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-10}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-15}
+      LOGIN_RATE_LIMIT: ${LOGIN_RATE_LIMIT:-10}
+      SWAGGER_ENABLED: ${SWAGGER_ENABLED:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      TZ: America/Bogota
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_FULLNAME: ${ADMIN_FULLNAME:-Administrador del sistema}
+    volumes:
+      - storage:/data/storage
+    networks: [internal]
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on: [api]
+    environment:
+      SIGM_HOSTNAME: ${SIGM_HOSTNAME:-sigm.local}
+      TZ: America/Bogota
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./infra/certs:/etc/nginx/certs
+    networks: [internal]
+
+  backup:
+    build: ./infra/backup
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER:-sigm}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-sigm}
+      BACKUP_DIR: /backups
+      STORAGE_DIR: /storage
+      RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+      BACKUP_CRON: ${BACKUP_CRON:-0 2 * * *}
+      RESTORE_TEST: ${BACKUP_RESTORE_TEST:-weekly}
+      TZ: America/Bogota
+    volumes:
+      - storage:/storage:ro
+      # Copias en un volumen/ruta SEPARADO del volumen principal de datos.
+      # En producción apunte BACKUP_PATH a un disco distinto o recurso de red.
+      - ${BACKUP_PATH:-./backups}:/backups
+    networks: [internal]
+
+volumes:
+  pgdata:
+  storage:
+
+networks:
+  internal:

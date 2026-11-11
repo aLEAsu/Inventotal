@@ -1,0 +1,20 @@
+/** Genera docs/05-matriz-roles-permisos.md a partir del catálogo real de permisos (src/common/permissions.ts) */
+import { writeFileSync } from 'node:fs';
+import { PERMISSIONS, ROLES } from '../src/common/permissions';
+const scope: Record<string, string> = { ALL: 'Todas las áreas', AREA: 'Solo áreas asignadas', OWN: 'Solo sus propios registros' };
+let md = '# Matriz de roles y permisos\n\n> Generado automáticamente desde `backend/src/common/permissions.ts` (`npx ts-node scripts/gen-roles-matrix.ts`). Es la matriz **inicial**: el administrador puede ajustarla en Usuarios y permisos › Roles. El control se aplica en el backend (guardia de permisos + filtros por área en cada servicio).\n\n';
+md += '## Roles\n\n| Rol | Código | Alcance de datos | Descripción |\n|---|---|---|---|\n';
+for (const r of ROLES) md += `| ${r.name} | \`${r.code}\` | ${scope[r.scope]} | ${r.description} |\n`;
+md += '\n## Permisos por rol\n\n| Módulo | Permiso | Descripción | ' + ROLES.map((r) => r.name).join(' | ') + ' |\n|' + '---|'.repeat(3 + ROLES.length) + '\n';
+for (const p of PERMISSIONS) md += `| ${p.module} | \`${p.code}\` | ${p.description} | ` + ROLES.map((r) => (r.permissions.includes(p.code) ? '✔' : '')).join(' | ') + ' |\n';
+md += '\n## Reglas adicionales aplicadas en el servidor\n\n';
+md += '- **Alcance por área**: el rol *Responsable de área* solo consulta y gestiona activos, programas, actividades, órdenes, fallas y documentos de sus áreas asignadas.\n';
+md += '- **Órdenes de trabajo**: con `workorders.read` solo se ven las órdenes asignadas o creadas por el usuario; con `workorders.read_all` todas las del alcance. Solo el responsable asignado (o quien tiene `workorders.assign`) puede ejecutar.\n';
+md += '- **Segregación de funciones**: quien ejecutó una orden no puede validarla (parámetro `workorders.allowSelfVerification`, desactivado por defecto).\n';
+md += '- **Activos críticos**: solo un usuario con *competencia técnica certificada* y permiso `failures.release` puede declararlos reparados y liberarlos.\n';
+md += '- **Plan aprobado**: modificarlo (reprogramar, cancelar o agregar actividades) exige `plans.approve` y queda versionado.\n';
+md += '- **Solicitante**: solo reporta fallas y consulta/adjunta soportes de sus propios reportes.\n';
+md += '- **Auditor / Calidad**: solo lectura; no tiene permisos de escritura.\n';
+md += '- **Administrador**: sus permisos no se pueden reducir desde la interfaz; ningún usuario puede desactivarse ni cambiar su propio rol.\n';
+writeFileSync('../docs/05-matriz-roles-permisos.md', md);
+console.log('ok');

@@ -1,0 +1,1021 @@
+// =============================================================================
+// SIGM - Sistema Integral de Gestión de Mantenimiento
+// Modelo relacional PostgreSQL 18 (Prisma 7)
+// Convenciones:
+//  - Fechas de programación: DATE (@db.Date)
+//  - Marcas de tiempo de auditoría: TIMESTAMPTZ (@db.Timestamptz(6))
+//  - Montos en COP: NUMERIC(14,2)
+//  - No hay borrado físico de registros históricos (baja lógica / estados)
+// =============================================================================
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ----------------------------------------------------------------------------
+// Configuración
+// ----------------------------------------------------------------------------
+
+model Setting {
+  key         String   @id
+  value       Json
+  description String?
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+  updatedById String?  @db.Uuid
+
+  @@map("settings")
+}
+
+/// Consecutivos transaccionales (órdenes, fallas, activos ...)
+model Counter {
+  key   String
+  year  Int
+  value Int    @default(0)
+
+  @@id([key, year])
+  @@map("counters")
+}
+
+// ----------------------------------------------------------------------------
+// Seguridad: usuarios, roles, permisos, sesiones
+// ----------------------------------------------------------------------------
+
+enum AreaScope {
+  ALL // ve todas las áreas
+  AREA // limitado a sus áreas asignadas
+  OWN // solo sus propios registros (solicitante)
+}
+
+model Role {
+  id          String           @id @default(uuid()) @db.Uuid
+  code        String           @unique
+  name        String
+  description String?
+  scope       AreaScope        @default(ALL)
+  isSystem    Boolean          @default(false)
+  createdAt   DateTime         @default(now()) @db.Timestamptz(6)
+  permissions RolePermission[]
+  users       User[]
+
+  @@map("roles")
+}
+
+model Permission {
+  code        String           @id
+  module      String
+  action      String
+  description String
+  roles       RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId         String     @db.Uuid
+  permissionCode String
+  role           Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission     Permission @relation(fields: [permissionCode], references: [code], onDelete: Cascade)
+
+  @@id([roleId, permissionCode])
+  @@map("role_permissions")
+}
+
+model User {
+  id                 String    @id @default(uuid()) @db.Uuid
+  username           String    @unique
+  email              String?   @unique
+  fullName           String
+  documentId         String?
+  position           String?
+  passwordHash       String
+  roleId             String    @db.Uuid
+  isActive           Boolean   @default(true)
+  /// Competencia técnica certificada: requerida para liberar activos críticos
+  isTechnicalStaff   Boolean   @default(false)
+  mustChangePassword Boolean   @default(false)
+  failedLoginCount   Int       @default(0)
+  lockedUntil        DateTime? @db.Timestamptz(6)
+  lastLoginAt        DateTime? @db.Timestamptz(6)
+  passwordChangedAt  DateTime? @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime  @updatedAt @db.Timestamptz(6)
+
+  role     Role       @relation(fields: [roleId], references: [id])
+  areas    UserArea[]
+  sessions Session[]
+
+  assetsResponsible   Asset[]              @relation("AssetResponsible")
+  assetsCreated       Asset[]              @relation("AssetCreatedBy")
+  programsResponsible MaintenanceProgram[] @relation("ProgramResponsible")
+  activitiesResp      ScheduledActivity[]  @relation("ActivityResponsible")
+  workOrdersAssigned  WorkOrder[]          @relation("WOAssigned")
+  workOrdersCreated   WorkOrder[]          @relation("WOCreated")
+  workOrdersVerified  WorkOrder[]          @relation("WOVerified")
+  failuresReported    FailureReport[]      @relation("FailureReporter")
+  failuresReleased    FailureReport[]      @relation("FailureReleasedBy")
+  failuresAssigned    FailureReport[]      @relation("FailureAssigned")
+
+  @@index([roleId])
+  @@map("users")
+}
+
+model UserArea {
+  userId String @db.Uuid
+  areaId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  area   Area   @relation(fields: [areaId], references: [id], onDelete: Cascade)
+
+  @@id([userId, areaId])
+  @@map("user_areas")
+}
+
+model Session {
+  id         String   @id @default(uuid()) @db.Uuid
+  tokenHash  String   @unique
+  csrfToken  String
+  userId     String   @db.Uuid
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime @default(now()) @db.Timestamptz(6)
+  expiresAt  DateTime @db.Timestamptz(6)
+  lastSeenAt DateTime @default(now()) @db.Timestamptz(6)
+  revokedAt  DateTime? @db.Timestamptz(6)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model LoginAttempt {
+  id        BigInt   @id @default(autoincrement())
+  username  String
+  ip        String?
+  success   Boolean
+  reason    String?
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([username, createdAt])
+  @@index([ip, createdAt])
+  @@map("login_attempts")
+}
+
+// ----------------------------------------------------------------------------
+// Estructura organizacional
+// ----------------------------------------------------------------------------
+
+model Area {
+  id          String     @id @default(uuid()) @db.Uuid
+  code        String     @unique
+  name        String     @unique
+  description String?
+  isActive    Boolean    @default(true)
+  createdAt   DateTime   @default(now()) @db.Timestamptz(6)
+  locations   Location[]
+  assets      Asset[]
+  users       UserArea[]
+  workOrders  WorkOrder[]
+  failures    FailureReport[]
+
+  @@map("areas")
+}
+
+model Location {
+  id          String   @id @default(uuid()) @db.Uuid
+  code        String   @unique
+  name        String
+  building    String?
+  floor       String?
+  areaId      String?  @db.Uuid
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  area        Area?    @relation(fields: [areaId], references: [id])
+  assets      Asset[]
+
+  @@map("locations")
+}
+
+// ----------------------------------------------------------------------------
+// Inventario de activos
+// ----------------------------------------------------------------------------
+
+model AssetCategory {
+  id            String             @id @default(uuid()) @db.Uuid
+  code          String             @unique
+  name          String             @unique
+  description   String?
+  color         String?
+  isActive      Boolean            @default(true)
+  createdAt     DateTime           @default(now()) @db.Timestamptz(6)
+  subcategories AssetSubcategory[]
+  assets        Asset[]
+  programs      MaintenanceProgram[]
+
+  @@map("asset_categories")
+}
+
+model AssetSubcategory {
+  id         String        @id @default(uuid()) @db.Uuid
+  categoryId String        @db.Uuid
+  name       String
+  isActive   Boolean       @default(true)
+  category   AssetCategory @relation(fields: [categoryId], references: [id])
+  assets     Asset[]
+
+  @@unique([categoryId, name])
+  @@map("asset_subcategories")
+}
+
+enum Criticality {
+  CRITICA
+  ALTA
+  MEDIA
+  BAJA
+}
+
+enum AssetStatus {
+  OPERATIVO
+  OPERATIVO_CON_OBSERVACIONES
+  EN_MANTENIMIENTO
+  FUERA_DE_SERVICIO
+  RETIRADO
+  DADO_DE_BAJA
+}
+
+model Asset {
+  id               String       @id @default(uuid()) @db.Uuid
+  code             String       @unique
+  name             String
+  categoryId       String       @db.Uuid
+  subcategoryId    String?      @db.Uuid
+  description      String?
+  brand            String?
+  model            String?
+  serialNumber     String?
+  locationId       String?      @db.Uuid
+  areaId           String       @db.Uuid
+  acquisitionDate  DateTime?    @db.Date
+  installationDate DateTime?    @db.Date
+  manufacturer     String?
+  supplierId       String?      @db.Uuid
+  warrantyUntil    DateTime?    @db.Date
+  warrantyInfo     String?
+  acquisitionCost  Decimal?     @db.Decimal(14, 2)
+  // --- Datos técnicos de equipos de cómputo y sistemas (TI)
+  hostname         String?
+  ipAddress        String?
+  macAddress       String?
+  operatingSystem  String?
+  softwareVersion  String?
+  processor        String?
+  ramGb            Int?
+  storageGb        Int?
+  /// Funcionario / puesto que usa el equipo (no es usuario del sistema)
+  endUser          String?
+  licenseExpiresAt DateTime?    @db.Date
+  criticality      Criticality  @default(MEDIA)
+  status           AssetStatus  @default(OPERATIVO)
+  responsibleId    String?      @db.Uuid
+  notes            String?
+  statusReason     String?
+  decommissionedAt DateTime?    @db.Date
+  createdAt        DateTime     @default(now()) @db.Timestamptz(6)
+  createdById      String       @db.Uuid
+  updatedAt        DateTime     @updatedAt @db.Timestamptz(6)
+
+  category    AssetCategory     @relation(fields: [categoryId], references: [id])
+  subcategory AssetSubcategory? @relation(fields: [subcategoryId], references: [id])
+  location    Location?         @relation(fields: [locationId], references: [id])
+  area        Area              @relation(fields: [areaId], references: [id])
+  supplier    Supplier?         @relation(fields: [supplierId], references: [id])
+  responsible User?             @relation("AssetResponsible", fields: [responsibleId], references: [id])
+  createdBy   User              @relation("AssetCreatedBy", fields: [createdById], references: [id])
+
+  criticalityAssessments CriticalityAssessment[]
+  programs               MaintenanceProgram[]
+  activities             ScheduledActivity[]
+  workOrders             WorkOrder[]
+  failures               FailureReport[]
+  documents              Document[]
+  contracts              ContractAsset[]
+  statusHistory          AssetStatusHistory[]
+
+  @@index([categoryId])
+  @@index([areaId])
+  @@index([status])
+  @@index([criticality])
+  @@index([hostname])
+  @@index([ipAddress])
+  @@map("assets")
+}
+
+model AssetStatusHistory {
+  id         BigInt      @id @default(autoincrement())
+  assetId    String      @db.Uuid
+  fromStatus AssetStatus?
+  toStatus   AssetStatus
+  reason     String?
+  userId     String?     @db.Uuid
+  createdAt  DateTime    @default(now()) @db.Timestamptz(6)
+  asset      Asset       @relation(fields: [assetId], references: [id])
+
+  @@index([assetId, createdAt])
+  @@map("asset_status_history")
+}
+
+// ----------------------------------------------------------------------------
+// Criticidad y gestión del riesgo
+// ----------------------------------------------------------------------------
+
+model CriticalityCriterion {
+  id          String  @id @default(uuid()) @db.Uuid
+  code        String  @unique
+  name        String
+  description String?
+  /// Ponderación (0-100). La suma de criterios activos debería ser 100.
+  weight      Decimal @db.Decimal(6, 2)
+  /// Escala de puntuación 1..maxScore
+  maxScore    Int     @default(5)
+  /// Descripción de cada nivel de la escala ["1 = ...", ...]
+  scaleGuide  Json?
+  isActive    Boolean @default(true)
+  sortOrder   Int     @default(0)
+
+  @@map("criticality_criteria")
+}
+
+model CriticalityAssessment {
+  id            String      @id @default(uuid()) @db.Uuid
+  assetId       String      @db.Uuid
+  /// { [criterionCode]: { score, weight, maxScore } }
+  scores        Json
+  totalScore    Decimal     @db.Decimal(6, 2)
+  computedLevel Criticality
+  /// Nivel finalmente asignado (puede diferir del calculado con justificación)
+  assignedLevel Criticality
+  justification String
+  assessedById  String      @db.Uuid
+  assessedAt    DateTime    @default(now()) @db.Timestamptz(6)
+  asset         Asset       @relation(fields: [assetId], references: [id])
+
+  @@index([assetId, assessedAt])
+  @@map("criticality_assessments")
+}
+
+// ----------------------------------------------------------------------------
+// Proveedores y contratos
+// ----------------------------------------------------------------------------
+
+enum SupplierType {
+  INTERNO
+  EXTERNO
+}
+
+model Supplier {
+  id           String       @id @default(uuid()) @db.Uuid
+  name         String
+  nit          String?      @unique
+  type         SupplierType @default(EXTERNO)
+  contactName  String?
+  email        String?
+  phone        String?
+  specialty    String?
+  services     String?
+  address      String?
+  isActive     Boolean      @default(true)
+  createdAt    DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime     @updatedAt @db.Timestamptz(6)
+  contracts    Contract[]
+  assets       Asset[]
+  programs     MaintenanceProgram[]
+  workOrders   WorkOrder[]
+  documents    Document[]
+  evaluations  SupplierEvaluation[]
+
+  @@map("suppliers")
+}
+
+enum ContractStatus {
+  VIGENTE
+  VENCIDO
+  TERMINADO
+  ANULADO
+}
+
+model Contract {
+  id          String          @id @default(uuid()) @db.Uuid
+  supplierId  String          @db.Uuid
+  number      String          @unique
+  object      String
+  startDate   DateTime        @db.Date
+  endDate     DateTime        @db.Date
+  value       Decimal?        @db.Decimal(14, 2)
+  status      ContractStatus  @default(VIGENTE)
+  notes       String?
+  createdAt   DateTime        @default(now()) @db.Timestamptz(6)
+  supplier    Supplier        @relation(fields: [supplierId], references: [id])
+  assets      ContractAsset[]
+  documents   Document[]
+
+  @@index([endDate])
+  @@map("contracts")
+}
+
+model ContractAsset {
+  contractId String   @db.Uuid
+  assetId    String   @db.Uuid
+  contract   Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  asset      Asset    @relation(fields: [assetId], references: [id])
+
+  @@id([contractId, assetId])
+  @@map("contract_assets")
+}
+
+model SupplierEvaluation {
+  id           String   @id @default(uuid()) @db.Uuid
+  supplierId   String   @db.Uuid
+  periodStart  DateTime @db.Date
+  periodEnd    DateTime @db.Date
+  /// { oportunidad: 1-5, calidad: 1-5, documentacion: 1-5, ... }
+  scores       Json
+  totalScore   Decimal  @db.Decimal(5, 2)
+  observations String?
+  evaluatedById String  @db.Uuid
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  supplier     Supplier @relation(fields: [supplierId], references: [id])
+
+  @@map("supplier_evaluations")
+}
+
+// ----------------------------------------------------------------------------
+// Plan maestro: programas preventivos
+// ----------------------------------------------------------------------------
+
+enum MaintenanceKind {
+  PREVENTIVO
+  INSPECCION
+  CALIBRACION
+  VERIFICACION_METROLOGICA
+  LIMPIEZA
+  PRUEBA_FUNCIONAL
+  OTRO
+}
+
+enum FrequencyType {
+  SEMANAL
+  QUINCENAL
+  MENSUAL
+  BIMESTRAL
+  TRIMESTRAL
+  CUATRIMESTRAL
+  SEMESTRAL
+  ANUAL
+  PERSONALIZADO
+  FECHAS_ESPECIFICAS
+}
+
+enum IntervalUnit {
+  DIAS
+  SEMANAS
+  MESES
+}
+
+model MaintenanceProgram {
+  id                    String          @id @default(uuid()) @db.Uuid
+  code                  String          @unique
+  assetId               String          @db.Uuid
+  categoryId            String          @db.Uuid
+  kind                  MaintenanceKind @default(PREVENTIVO)
+  name                  String
+  description           String?
+  procedure             String?
+  /// [{ id, text, required }]
+  checklist             Json            @default("[]")
+  frequencyType         FrequencyType
+  /// Para PERSONALIZADO: cada N unidades
+  intervalValue         Int?
+  intervalUnit          IntervalUnit?
+  /// Para FECHAS_ESPECIFICAS: ["MM-DD", ...] repetidas cada año
+  specificDates         String[]
+  startDate             DateTime        @db.Date
+  /// Fecha ancla desde la que se calculan las recurrencias
+  baseDate              DateTime        @db.Date
+  endDate               DateTime?       @db.Date
+  lastPerformedDate     DateTime?       @db.Date
+  estimatedDurationMin  Int?
+  responsibleId         String?         @db.Uuid
+  supplierId            String?         @db.Uuid
+  technicalRequirements String?
+  references            String?
+  /// Sustento técnico de la periodicidad (fabricante, norma, historial...)
+  frequencyJustification String
+  notes                 String?
+  isActive              Boolean         @default(true)
+  version               Int             @default(1)
+  createdAt             DateTime        @default(now()) @db.Timestamptz(6)
+  createdById           String          @db.Uuid
+  updatedAt             DateTime        @updatedAt @db.Timestamptz(6)
+
+  asset       Asset               @relation(fields: [assetId], references: [id])
+  category    AssetCategory       @relation(fields: [categoryId], references: [id])
+  responsible User?               @relation("ProgramResponsible", fields: [responsibleId], references: [id])
+  supplier    Supplier?           @relation(fields: [supplierId], references: [id])
+  activities  ScheduledActivity[]
+
+  @@index([assetId])
+  @@index([isActive])
+  @@map("maintenance_programs")
+}
+
+// ----------------------------------------------------------------------------
+// Plan anual y cronograma
+// ----------------------------------------------------------------------------
+
+enum PlanStatus {
+  BORRADOR
+  EN_REVISION
+  APROBADO
+  CERRADO
+}
+
+model AnnualPlan {
+  id            String     @id @default(uuid()) @db.Uuid
+  year          Int        @unique
+  version       Int        @default(1)
+  status        PlanStatus @default(BORRADOR)
+  documentCode  String
+  title         String     @default("PLAN ANUAL DE MANTENIMIENTO")
+  notes         String?
+  createdById   String     @db.Uuid
+  createdAt     DateTime   @default(now()) @db.Timestamptz(6)
+  submittedById String?    @db.Uuid
+  submittedAt   DateTime?  @db.Timestamptz(6)
+  reviewedById  String?    @db.Uuid
+  reviewedAt    DateTime?  @db.Timestamptz(6)
+  approvedById  String?    @db.Uuid
+  approvedAt    DateTime?  @db.Timestamptz(6)
+  closedById    String?    @db.Uuid
+  closedAt      DateTime?  @db.Timestamptz(6)
+  lastGeneratedAt DateTime? @db.Timestamptz(6)
+  updatedAt     DateTime   @updatedAt @db.Timestamptz(6)
+
+  activities ScheduledActivity[]
+  history    AnnualPlanEvent[]
+  versions   AnnualPlanVersion[]
+  documents  Document[]
+
+  @@map("annual_plans")
+}
+
+model AnnualPlanEvent {
+  id        BigInt     @id @default(autoincrement())
+  planId    String     @db.Uuid
+  action    String
+  fromStatus PlanStatus?
+  toStatus  PlanStatus?
+  version   Int
+  detail    Json?
+  reason    String?
+  userId    String     @db.Uuid
+  createdAt DateTime   @default(now()) @db.Timestamptz(6)
+  plan      AnnualPlan @relation(fields: [planId], references: [id])
+
+  @@index([planId, createdAt])
+  @@map("annual_plan_events")
+}
+
+/// Instantánea inmutable del plan en cada aprobación
+model AnnualPlanVersion {
+  id           String     @id @default(uuid()) @db.Uuid
+  planId       String     @db.Uuid
+  version      Int
+  approvedById String     @db.Uuid
+  approvedAt   DateTime   @db.Timestamptz(6)
+  activityCount Int
+  snapshot     Json
+  reason       String?
+  plan         AnnualPlan @relation(fields: [planId], references: [id])
+
+  @@unique([planId, version])
+  @@map("annual_plan_versions")
+}
+
+enum ActivityStatus {
+  PROGRAMADO
+  EN_EJECUCION
+  EJECUTADO
+  REPROGRAMADO
+  CANCELADO
+  NO_APLICA
+}
+
+model ScheduledActivity {
+  id            String          @id @default(uuid()) @db.Uuid
+  planId        String          @db.Uuid
+  programId     String          @db.Uuid
+  assetId       String          @db.Uuid
+  /// Clave de idempotencia: fecha calculada por la regla de recurrencia (YYYY-MM-DD)
+  periodKey     String
+  /// Fecha originalmente programada/aprobada (nunca se modifica tras aprobación)
+  originalDate  DateTime        @db.Date
+  /// Fecha actualmente comprometida (reprogramaciones aprobadas)
+  committedDate DateTime        @db.Date
+  /// Fecha real de ejecución
+  executedDate  DateTime?       @db.Date
+  status        ActivityStatus  @default(PROGRAMADO)
+  responsibleId String?         @db.Uuid
+  /// Agregada después de la aprobación del plan (no hace parte de la línea base)
+  addedAfterApproval Boolean    @default(false)
+  /// Datos del programa al momento de la generación
+  programSnapshot Json
+  statusReason  String?
+  createdAt     DateTime        @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime        @updatedAt @db.Timestamptz(6)
+
+  plan        AnnualPlan   @relation(fields: [planId], references: [id])
+  program     MaintenanceProgram @relation(fields: [programId], references: [id])
+  asset       Asset        @relation(fields: [assetId], references: [id])
+  responsible User?        @relation("ActivityResponsible", fields: [responsibleId], references: [id])
+  reschedules Reschedule[]
+  workOrder   WorkOrder?
+
+  @@unique([planId, programId, periodKey])
+  @@index([planId, committedDate])
+  @@index([assetId])
+  @@index([status])
+  @@map("scheduled_activities")
+}
+
+enum RescheduleStatus {
+  PENDIENTE
+  APROBADA
+  RECHAZADA
+}
+
+model Reschedule {
+  id            String           @id @default(uuid()) @db.Uuid
+  activityId    String           @db.Uuid
+  fromDate      DateTime         @db.Date
+  toDate        DateTime         @db.Date
+  reason        String
+  status        RescheduleStatus @default(PENDIENTE)
+  requestedById String           @db.Uuid
+  requestedAt   DateTime         @default(now()) @db.Timestamptz(6)
+  decidedById   String?          @db.Uuid
+  decidedAt     DateTime?        @db.Timestamptz(6)
+  decisionNote  String?
+  activity      ScheduledActivity @relation(fields: [activityId], references: [id])
+
+  @@index([activityId])
+  @@index([status])
+  @@map("reschedules")
+}
+
+// ----------------------------------------------------------------------------
+// Órdenes de trabajo
+// ----------------------------------------------------------------------------
+
+enum WorkOrderType {
+  PREVENTIVA
+  CORRECTIVA
+}
+
+enum Priority {
+  URGENTE
+  ALTA
+  MEDIA
+  BAJA
+}
+
+enum WorkOrderStatus {
+  ABIERTA
+  ASIGNADA
+  EN_EJECUCION
+  PENDIENTE_REPUESTOS
+  PENDIENTE_PROVEEDOR
+  PENDIENTE_VALIDACION
+  CERRADA
+  CANCELADA
+}
+
+enum FinalCondition {
+  OPERATIVO
+  OPERATIVO_CON_OBSERVACIONES
+  FUERA_DE_SERVICIO
+  REQUIERE_BAJA
+}
+
+model WorkOrder {
+  id                 String          @id @default(uuid()) @db.Uuid
+  code               String          @unique
+  type               WorkOrderType
+  assetId            String          @db.Uuid
+  areaId             String          @db.Uuid
+  activityId         String?         @unique @db.Uuid
+  failureReportId    String?         @db.Uuid
+  parentWorkOrderId  String?         @db.Uuid
+  priority           Priority        @default(MEDIA)
+  status             WorkOrderStatus @default(ABIERTA)
+  title              String
+  description        String?
+  interventionType   String?
+  scheduledDate      DateTime?       @db.Date
+  dueDate            DateTime?       @db.Date
+  assignedToId       String?         @db.Uuid
+  supplierId         String?         @db.Uuid
+  startedAt          DateTime?       @db.Timestamptz(6)
+  finishedAt         DateTime?       @db.Timestamptz(6)
+  activitiesPerformed String?
+  diagnosis          String?
+  /// [{ itemId, text, required, result: CUMPLE|NO_CUMPLE|NO_APLICA, note }]
+  checklistResults   Json?
+  findings           String?
+  result             String?
+  testsPerformed     String?
+  finalCondition     FinalCondition?
+  laborCost          Decimal         @default(0) @db.Decimal(14, 2)
+  externalCost       Decimal         @default(0) @db.Decimal(14, 2)
+  partsCost          Decimal         @default(0) @db.Decimal(14, 2)
+  totalCost          Decimal         @default(0) @db.Decimal(14, 2)
+  verifiedById       String?         @db.Uuid
+  verifiedAt         DateTime?       @db.Timestamptz(6)
+  verificationNote   String?
+  /// Identificación de quien valida (nombre + documento/cargo)
+  validatorSignature String?
+  pauseReason        String?
+  cancelReason       String?
+  createdById        String          @db.Uuid
+  createdAt          DateTime        @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime        @updatedAt @db.Timestamptz(6)
+  closedAt           DateTime?       @db.Timestamptz(6)
+
+  asset         Asset              @relation(fields: [assetId], references: [id])
+  area          Area               @relation(fields: [areaId], references: [id])
+  activity      ScheduledActivity? @relation(fields: [activityId], references: [id])
+  failureReport FailureReport?     @relation("FailureWorkOrders", fields: [failureReportId], references: [id])
+  parent        WorkOrder?         @relation("WOParent", fields: [parentWorkOrderId], references: [id])
+  children      WorkOrder[]        @relation("WOParent")
+  assignedTo    User?              @relation("WOAssigned", fields: [assignedToId], references: [id])
+  supplier      Supplier?          @relation(fields: [supplierId], references: [id])
+  createdBy     User               @relation("WOCreated", fields: [createdById], references: [id])
+  verifiedBy    User?              @relation("WOVerified", fields: [verifiedById], references: [id])
+  parts         WorkOrderPart[]
+  events        WorkOrderEvent[]
+  documents     Document[]
+  resolvesFailures FailureReport[] @relation("FailureResolvedBy")
+
+  @@index([status])
+  @@index([assetId])
+  @@index([type, status])
+  @@index([assignedToId])
+  @@index([createdAt])
+  @@map("work_orders")
+}
+
+model WorkOrderPart {
+  id          String    @id @default(uuid()) @db.Uuid
+  workOrderId String    @db.Uuid
+  name        String
+  partNumber  String?
+  quantity    Decimal   @db.Decimal(12, 2)
+  unitCost    Decimal   @db.Decimal(14, 2)
+  totalCost   Decimal   @db.Decimal(14, 2)
+  createdAt   DateTime  @default(now()) @db.Timestamptz(6)
+  workOrder   WorkOrder @relation(fields: [workOrderId], references: [id])
+
+  @@map("work_order_parts")
+}
+
+model WorkOrderEvent {
+  id          BigInt           @id @default(autoincrement())
+  workOrderId String           @db.Uuid
+  action      String
+  fromStatus  WorkOrderStatus?
+  toStatus    WorkOrderStatus?
+  note        String?
+  changes     Json?
+  userId      String           @db.Uuid
+  createdAt   DateTime         @default(now()) @db.Timestamptz(6)
+  workOrder   WorkOrder        @relation(fields: [workOrderId], references: [id])
+
+  @@index([workOrderId, createdAt])
+  @@map("work_order_events")
+}
+
+// ----------------------------------------------------------------------------
+// Mantenimiento correctivo: reportes de falla
+// ----------------------------------------------------------------------------
+
+enum FailureStatus {
+  REPORTADA
+  EN_EVALUACION
+  ASIGNADA
+  EN_ATENCION
+  RESUELTA
+  CERRADA
+  ANULADA
+}
+
+enum AssetConditionOnReport {
+  FUNCIONA_NORMAL
+  FUNCIONA_CON_LIMITACIONES
+  NO_FUNCIONA
+  RIESGO_SEGURIDAD
+}
+
+model FailureReport {
+  id                 String                 @id @default(uuid()) @db.Uuid
+  code               String                 @unique
+  reportedAt         DateTime               @default(now()) @db.Timestamptz(6)
+  reporterId         String                 @db.Uuid
+  areaId             String                 @db.Uuid
+  assetId            String                 @db.Uuid
+  title              String
+  description        String
+  assetCondition     AssetConditionOnReport
+  serviceImpact      String?
+  /// Puntuaciones de criterios de priorización {safety, care, continuity, criticality}
+  priorityInputs     Json
+  priorityScore      Decimal                @db.Decimal(6, 2)
+  priority           Priority
+  priorityOverrideReason String?
+  status             FailureStatus          @default(REPORTADA)
+  assignedToId       String?                @db.Uuid
+  firstResponseAt    DateTime?              @db.Timestamptz(6)
+  outOfService       Boolean                @default(false)
+  downtimeStart      DateTime?              @db.Timestamptz(6)
+  downtimeEnd        DateTime?              @db.Timestamptz(6)
+  resolvedAt         DateTime?              @db.Timestamptz(6)
+  resolvedByWorkOrderId String?             @db.Uuid
+  releaseAuthorizedById String?             @db.Uuid
+  releaseAuthorizedAt   DateTime?           @db.Timestamptz(6)
+  releaseNote        String?
+  closedAt           DateTime?              @db.Timestamptz(6)
+  cancelReason       String?
+  observations       String?
+  createdAt          DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime               @updatedAt @db.Timestamptz(6)
+
+  reporter      User       @relation("FailureReporter", fields: [reporterId], references: [id])
+  assignedTo    User?      @relation("FailureAssigned", fields: [assignedToId], references: [id])
+  releasedBy    User?      @relation("FailureReleasedBy", fields: [releaseAuthorizedById], references: [id])
+  area          Area       @relation(fields: [areaId], references: [id])
+  asset         Asset      @relation(fields: [assetId], references: [id])
+  resolvedBy    WorkOrder? @relation("FailureResolvedBy", fields: [resolvedByWorkOrderId], references: [id])
+  workOrders    WorkOrder[] @relation("FailureWorkOrders")
+  documents     Document[]
+
+  @@index([status])
+  @@index([priority, status])
+  @@index([assetId, reportedAt])
+  @@map("failure_reports")
+}
+
+// ----------------------------------------------------------------------------
+// Documentos y evidencias (binarios en almacenamiento privado)
+// ----------------------------------------------------------------------------
+
+enum DocumentType {
+  MANUAL_TECNICO
+  FICHA_TECNICA
+  CERTIFICADO
+  INFORME_MANTENIMIENTO
+  FOTOGRAFIA
+  ACTA_SERVICIO
+  COTIZACION
+  FACTURA
+  GARANTIA
+  CONTRATO
+  OTRO
+}
+
+model Document {
+  id              String       @id @default(uuid()) @db.Uuid
+  type            DocumentType
+  title           String
+  description     String?
+  originalName    String
+  storedName      String       @unique
+  mimeType        String
+  sizeBytes       Int
+  sha256          String
+  assetId         String?      @db.Uuid
+  workOrderId     String?      @db.Uuid
+  failureReportId String?      @db.Uuid
+  supplierId      String?      @db.Uuid
+  contractId      String?      @db.Uuid
+  planId          String?      @db.Uuid
+  uploadedById    String       @db.Uuid
+  uploadedAt      DateTime     @default(now()) @db.Timestamptz(6)
+  /// Anulación lógica (el archivo se conserva)
+  voidedAt        DateTime?    @db.Timestamptz(6)
+  voidedById      String?      @db.Uuid
+  voidReason      String?
+
+  asset         Asset?         @relation(fields: [assetId], references: [id])
+  workOrder     WorkOrder?     @relation(fields: [workOrderId], references: [id])
+  failureReport FailureReport? @relation(fields: [failureReportId], references: [id])
+  supplier      Supplier?      @relation(fields: [supplierId], references: [id])
+  contract      Contract?      @relation(fields: [contractId], references: [id])
+  plan          AnnualPlan?    @relation(fields: [planId], references: [id])
+
+  @@index([assetId])
+  @@index([workOrderId])
+  @@index([failureReportId])
+  @@index([type])
+  @@map("documents")
+}
+
+// ----------------------------------------------------------------------------
+// Control documental: formatos y procedimientos
+// ----------------------------------------------------------------------------
+
+model DocumentFormat {
+  code          String   @id // F-01 ... F-12
+  name          String
+  documentCode  String
+  version       String
+  effectiveDate DateTime @db.Date
+  elaboratedBy  String?
+  reviewedBy    String?
+  approvedBy    String?
+  /// [{ version, date, description }]
+  changeLog     Json     @default("[]")
+  updatedAt     DateTime @updatedAt @db.Timestamptz(6)
+
+  @@map("document_formats")
+}
+
+model Procedure {
+  id          String   @id @default(uuid()) @db.Uuid
+  code        String   @unique
+  title       String
+  objective   String
+  scope       String?
+  responsible String?
+  /// Pasos en texto (Markdown simple)
+  content     String
+  version     Int      @default(1)
+  isActive    Boolean  @default(true)
+  /// true = plantilla inicial pendiente de validación institucional
+  pendingValidation Boolean @default(true)
+  updatedById String?  @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+
+  @@map("procedures")
+}
+
+// ----------------------------------------------------------------------------
+// Auditoría (inmutable: protegida con trigger en BD)
+// ----------------------------------------------------------------------------
+
+model AuditLog {
+  id        BigInt   @id @default(autoincrement())
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  userId    String?  @db.Uuid
+  username  String?
+  action    String
+  module    String
+  entity    String?
+  entityId  String?
+  before    Json?
+  after     Json?
+  reason    String?
+  ip        String?
+  userAgent String?
+
+  @@index([createdAt])
+  @@index([module, action])
+  @@index([entity, entityId])
+  @@index([userId])
+  @@map("audit_logs")
+}
+
+// ----------------------------------------------------------------------------
+// Respaldos
+// ----------------------------------------------------------------------------
+
+model BackupRun {
+  id            BigInt   @id @default(autoincrement())
+  kind          String   // DB | FILES
+  startedAt     DateTime @db.Timestamptz(6)
+  finishedAt    DateTime? @db.Timestamptz(6)
+  fileName      String?
+  sizeBytes     BigInt?
+  sha256        String?
+  status        String   // OK | ERROR
+  verified      Boolean  @default(false)
+  verifyMessage String?
+  restoreTested Boolean  @default(false)
+  message       String?
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([startedAt])
+  @@map("backup_runs")
+}

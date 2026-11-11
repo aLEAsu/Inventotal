@@ -1,0 +1,21 @@
+/** Traducción al español de los textos internos de PrimeVue */
+export const es = {
+  startsWith: 'Comienza con', contains: 'Contiene', notContains: 'No contiene', endsWith: 'Termina con', equals: 'Igual a', notEquals: 'Diferente de',
+  noFilter: 'Sin filtro', lt: 'Menor que', lte: 'Menor o igual', gt: 'Mayor que', gte: 'Mayor o igual', dateIs: 'Fecha es', dateIsNot: 'Fecha no es',
+  dateBefore: 'Antes de', dateAfter: 'Después de', clear: 'Limpiar', apply: 'Aplicar', matchAll: 'Coincidir todo', matchAny: 'Coincidir alguno',
+  addRule: 'Agregar regla', removeRule: 'Quitar regla', accept: 'Sí', reject: 'No', choose: 'Seleccionar', upload: 'Cargar', cancel: 'Cancelar',
+  completed: 'Completado', pending: 'Pendiente', fileSizeTypes: ['B', 'KB', 'MB', 'GB', 'TB'],
+  dayNames: ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'],
+  dayNamesShort: ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'],
+  dayNamesMin: ['D', 'L', 'M', 'X', 'J', 'V', 'S'],
+  monthNames: ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'],
+  monthNamesShort: ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'],
+  chooseYear: 'Elegir año', chooseMonth: 'Elegir mes', chooseDate: 'Elegir fecha', prevDecade: 'Década anterior', nextDecade: 'Década siguiente',
+  prevYear: 'Año anterior', nextYear: 'Año siguiente', prevMonth: 'Mes anterior', nextMonth: 'Mes siguiente', prevHour: 'Hora anterior',
+  nextHour: 'Hora siguiente', prevMinute: 'Minuto anterior', nextMinute: 'Minuto siguiente', prevSecond: 'Segundo anterior', nextSecond: 'Segundo siguiente',
+  am: 'a. m.', pm: 'p. m.', today: 'Hoy', weekHeader: 'Sem', firstDayOfWeek: 1, showMonthAfterYear: false, dateFormat: 'dd/mm/yy',
+  weak: 'Débil', medium: 'Media', strong: 'Fuerte', passwordPrompt: 'Ingrese una contraseña', emptyFilterMessage: 'Sin resultados',
+  searchMessage: '{0} resultados disponibles', selectionMessage: '{0} elementos seleccionados', emptySelectionMessage: 'Ningún elemento seleccionado',
+  emptySearchMessage: 'Sin resultados', emptyMessage: 'Sin opciones disponibles',
+  aria: { trueLabel: 'Verdadero', falseLabel: 'Falso', nullLabel: 'No seleccionado', star: '1 estrella', stars: '{star} estrellas', selectAll: 'Seleccionar todo', unselectAll: 'Deseleccionar todo', close: 'Cerrar', previous: 'Anterior', next: 'Siguiente', navigation: 'Navegación', scrollTop: 'Ir arriba', moveTop: 'Mover arriba', moveUp: 'Subir', moveDown: 'Bajar', moveBottom: 'Mover abajo', pageLabel: 'Página {page}', firstPageLabel: 'Primera página', lastPageLabel: 'Última página', nextPageLabel: 'Página siguiente', prevPageLabel: 'Página anterior', rowsPerPageLabel: 'Filas por página' },
+};
