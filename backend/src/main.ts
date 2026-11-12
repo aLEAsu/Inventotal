@@ -43,4 +43,10 @@ async function bootstrap() {
 
 // Arranca al ejecutarse directamente (node dist/main.js) o en Vercel, cuyo lanzador importa este
 // archivo como entrada (ahí require.main no es este módulo). Las pruebas lo importan sin arrancarlo.
-if (require.main === module || process.env.VERCEL) void bootstrap();
+if (require.main === module || process.env.VERCEL) {
+  bootstrap().catch((e) => {
+    // Visible en los logs del despliegue (Vercel → Logs) en vez de un fallo silencioso
+    console.error('[SIGM] La API no pudo iniciar:', e);
+    process.exit(1);
+  });
+}
