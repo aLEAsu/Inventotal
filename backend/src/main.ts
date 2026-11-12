@@ -41,4 +41,6 @@ async function bootstrap() {
   await app.listen(Number(process.env.PORT ?? 3000), '0.0.0.0');
 }
 
-if (require.main === module) void bootstrap();
+// Arranca al ejecutarse directamente (node dist/main.js) o en Vercel, cuyo lanzador importa este
+// archivo como entrada (ahí require.main no es este módulo). Las pruebas lo importan sin arrancarlo.
+if (require.main === module || process.env.VERCEL) void bootstrap();
