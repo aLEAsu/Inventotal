@@ -9,6 +9,8 @@ import { Prisma } from '../../src/generated/prisma/client';
 import { AllExceptionsFilter } from '../../src/common/errors.filter';
 import { currentYearBogota, todayBogota } from '../../src/common/dates';
 import type { PrismaService } from '../../src/common/prisma.service';
+import request from 'supertest';
+import { AuthService } from '../../src/modules/auth/auth.service';
 import { binaryParser, bootApp, Client, createUsers } from './helpers';
 
 jest.setTimeout(120_000);
@@ -62,6 +64,31 @@ describe('1. Inicio de sesión', () => {
     const ok = await new Client(app).login('t.lock'); // contraseña correcta, pero bloqueada
     expect(ok.status).toBe(401);
     expect(ok.body.message).toMatch(/bloqueada/);
+  });
+
+  it('frena por IP los intentos fallidos contra varios usuarios (persistido en la base)', async () => {
+    const ip = '203.0.113.77';
+    await prisma.loginAttempt.createMany({
+      data: Array.from({ length: 20 }, (_, i) => ({ username: `intruso${i}`, ip, success: false, reason: 'prueba' })),
+    });
+    const blocked = await request(app.getHttpServer()).post('/api/v1/auth/login').set('X-Forwarded-For', ip).send({ username: 't.coord', password: 'Clave-Incorrecta-1' });
+    expect(blocked.status).toBe(429);
+    // Otra IP no queda afectada
+    const other = await request(app.getHttpServer()).post('/api/v1/auth/login').set('X-Forwarded-For', '203.0.113.78').send({ username: 't.coord', password: 'Clave-Incorrecta-1' });
+    expect(other.status).toBe(401);
+    await prisma.loginAttempt.deleteMany({ where: { ip: { in: [ip, '203.0.113.78'] } } });
+  });
+
+  it('depura sesiones y accesos antiguos sin tocar la bitácora', async () => {
+    const u = await prisma.user.findUniqueOrThrow({ where: { username: 't.auditor' } });
+    const old = new Date(Date.now() - 400 * 86_400_000);
+    await prisma.session.create({ data: { tokenHash: `viejo-${Date.now()}`, csrfToken: 'x', userId: u.id, expiresAt: old, lastSeenAt: old, createdAt: old } });
+    await prisma.loginAttempt.create({ data: { username: 'antiguo', ip: '198.51.100.1', success: false, createdAt: old } });
+    const audits = await prisma.auditLog.count();
+    await app.get(AuthService).purgeOldAccessData();
+    expect(await prisma.session.count({ where: { expiresAt: old } })).toBe(0);
+    expect(await prisma.loginAttempt.count({ where: { username: 'antiguo' } })).toBe(0);
+    expect(await prisma.auditLog.count()).toBe(audits);
   });
 
   it('exige CSRF en operaciones de escritura y cierra sesión correctamente', async () => {

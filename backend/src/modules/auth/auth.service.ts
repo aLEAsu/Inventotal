@@ -1,10 +1,17 @@
-import { BadRequestException, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, HttpException, HttpStatus, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import * as argon2 from 'argon2';
 import { createHash, randomBytes } from 'node:crypto';
 import type { AuthUser, ReqCtx } from '../../common/auth.types';
 import { AuditService } from '../../common/audit.service';
 import { PrismaService } from '../../common/prisma.service';
 import { SettingsService } from '../../common/settings.service';
+
+/** Intentos fallidos permitidos por IP en la ventana (cualquier usuario); funciona entre instancias serverless */
+export const IP_MAX_FAILURES = Number(process.env.LOGIN_IP_MAX_FAILURES ?? 20);
+export const IP_WINDOW_MIN = 15;
+/** Retención de datos personales de acceso (IP, navegador): minimización (Ley 1581 de 2012) */
+const SESSION_RETENTION_DAYS = 30;
+const LOGIN_ATTEMPT_RETENTION_DAYS = 180;
 
 export const ARGON_OPTS = { type: argon2.argon2id, memoryCost: 19456, timeCost: 2, parallelism: 1 } as const;
 
@@ -42,6 +49,15 @@ export class AuthService {
 
   async login(username: string, password: string, ip?: string, userAgent?: string) {
     const uname = username.trim().toLowerCase();
+    // Freno por IP persistido en la base: el limitador en memoria no se comparte entre instancias serverless
+    if (ip) {
+      const since = new Date(Date.now() - IP_WINDOW_MIN * 60_000);
+      const failures = await this.prisma.loginAttempt.count({ where: { ip, success: false, createdAt: { gte: since } } });
+      if (failures >= IP_MAX_FAILURES) {
+        await this.audit.logAnon({ action: 'LOGIN_BLOQUEADO_IP', module: 'auth', username: uname, ip, userAgent, reason: `${failures} intentos fallidos en ${IP_WINDOW_MIN} min` });
+        throw new HttpException('Demasiados intentos de acceso desde esta conexión. Espere unos minutos.', HttpStatus.TOO_MANY_REQUESTS);
+      }
+    }
     const user = await this.prisma.user.findUnique({ where: { username: uname }, include: { role: true } });
     const maxFailed = await this.settings.get<number>('auth.maxFailedAttempts');
     const lockMin = await this.settings.get<number>('auth.lockMinutes');
@@ -64,12 +80,14 @@ export class AuthService {
     }
     const ok = await argon2.verify(user.passwordHash, password).catch(() => false);
     if (!ok) {
-      const count = user.failedLoginCount + 1;
-      const lock = count >= maxFailed;
-      await this.prisma.user.update({
-        where: { id: user.id },
-        data: { failedLoginCount: lock ? 0 : count, lockedUntil: lock ? new Date(Date.now() + lockMin * 60_000) : null },
+      // Incremento atómico: intentos simultáneos no se pierden
+      const { failedLoginCount: count } = await this.prisma.user.update({
+        where: { id: user.id }, data: { failedLoginCount: { increment: 1 } }, select: { failedLoginCount: true },
       });
+      const lock = count >= maxFailed;
+      if (lock) {
+        await this.prisma.user.update({ where: { id: user.id }, data: { failedLoginCount: 0, lockedUntil: new Date(Date.now() + lockMin * 60_000) } });
+      }
       await fail(lock ? 'Contraseña incorrecta: cuenta bloqueada' : 'Contraseña incorrecta');
       throw new UnauthorizedException('Usuario o contraseña incorrectos');
     }
@@ -92,7 +110,21 @@ export class AuthService {
       });
       return s;
     });
+    void this.purgeOldAccessData();
     return { token, csrfToken, expiresAt: session.expiresAt };
+  }
+
+  private readonly log = new Logger('AuthService');
+  /** Elimina sesiones vencidas o cerradas y registros de intentos de acceso antiguos (sin afectar la bitácora). */
+  async purgeOldAccessData() {
+    try {
+      const day = 86_400_000;
+      const sessionsBefore = new Date(Date.now() - SESSION_RETENTION_DAYS * day);
+      await this.prisma.session.deleteMany({ where: { OR: [{ expiresAt: { lt: sessionsBefore } }, { revokedAt: { lt: sessionsBefore } }] } });
+      await this.prisma.loginAttempt.deleteMany({ where: { createdAt: { lt: new Date(Date.now() - LOGIN_ATTEMPT_RETENTION_DAYS * day) } } });
+    } catch (e) {
+      this.log.warn(`No se pudo depurar datos de acceso antiguos: ${(e as Error).message}`);
+    }
   }
 
   /** Resuelve la sesión a partir del token de la cookie (con expiración deslizante acotada al TTL). */

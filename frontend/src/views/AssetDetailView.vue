@@ -63,11 +63,27 @@ async function saveCrit() {
   }
 }
 const pdf = () => n.run(() => download(`/assets/${id.value}/lifecycle/pdf`), 'Hoja de vida generada');
+/**
+ * Etiqueta QR imprimible. Se construye con nodos DOM y textContent (nunca HTML interpolado):
+ * el nombre y el código del activo son datos de usuario y no deben interpretarse como HTML (XSS).
+ * Sin scripts en línea, compatible con la política de seguridad de contenido (CSP).
+ */
 function printQr() {
   const w = window.open('', '_blank', 'width=420,height=520');
   if (!w || !a.value) return;
-  w.document.write(`<html><head><title>QR ${a.value.code}</title></head><body style="font-family:sans-serif;text-align:center"><img src="${qrUrl.value}" style="width:300px"><h2>${a.value.code}</h2><div>${a.value.name}</div><script>setTimeout(()=>print(),300)<\/script></body></html>`);
-  w.document.close();
+  const doc = w.document;
+  doc.title = `QR ${a.value.code}`;
+  doc.body.style.cssText = 'font-family:sans-serif;text-align:center';
+  const img = doc.createElement('img');
+  img.style.width = '300px';
+  img.alt = `Código QR ${a.value.code}`;
+  const code = doc.createElement('h2');
+  code.textContent = a.value.code;
+  const name = doc.createElement('div');
+  name.textContent = a.value.name;
+  doc.body.append(img, code, name);
+  img.onload = () => setTimeout(() => w.print(), 100);
+  img.src = qrUrl.value;
 }
 </script>
 

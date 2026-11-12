@@ -29,3 +29,47 @@
 5. **Swagger**: está habilitado por defecto en la red interna; desactívelo con `SWAGGER_ENABLED=false` si la política institucional lo exige.
 6. **Dependencias**: ejecute `npm audit` periódicamente y actualice las imágenes base (`node:24-alpine`, `postgres:18-alpine`, `nginx`).
 7. **CSP**: permite `'unsafe-inline'` en estilos porque lo requieren los componentes PrimeVue; los scripts están restringidos a `'self'`.
+
+## Revisión para producción en Vercel + Supabase (noviembre de 2026)
+
+### Hallazgos corregidos
+
+| Severidad | Hallazgo | Corrección |
+|---|---|---|
+| Crítica | Las 38 tablas del esquema `public` eran legibles y modificables desde la API REST pública de Supabase (PostgREST) con la clave `anon`, incluidos los hashes de contraseña. | Migración `security_hardening`: RLS activo sin políticas en todas las tablas y sin privilegios para `anon`/`authenticated` (también para tablas futuras). Verificado: 0 de 39 tablas accesibles. |
+| Alta | XSS almacenado al imprimir la etiqueta QR de un activo: el nombre y el código se insertaban como HTML en una ventana nueva. | La etiqueta se construye con nodos DOM y `textContent`, sin scripts en línea. |
+| Alta | El frontend en producción no enviaba CSP ni protección contra *clickjacking*. | `vercel.json`: CSP estricta (`script-src 'self'`, `frame-ancestors 'none'`, `object-src 'none'`), `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy`, `Permissions-Policy`, `Cross-Origin-Opener-Policy`; respuestas de la API con `Cache-Control: no-store`. |
+| Media | El freno de fuerza bruta del login vivía en memoria de cada instancia; en serverless no se comparte. | Límite por IP persistido en la base (`LOGIN_IP_MAX_FAILURES`, 20 fallos en 15 min → 429), además del bloqueo por cuenta. |
+| Media | El contador de intentos fallidos podía perder incrementos con intentos simultáneos. | Incremento atómico en la base. |
+| Media | Sesiones y registros de acceso (IP, navegador) se conservaban indefinidamente. | Depuración automática: sesiones vencidas/cerradas > 30 días y accesos > 180 días (la bitácora inmutable no se toca). Minimización de datos personales, Ley 1581 de 2012. |
+| Media | Conexión a Supabase: `sslmode=require` fallaba la verificación y sin `sslmode` no se cifraba. | TLS siempre activo hacia Supabase; verificación completa con `DB_SSL_CA`. |
+| Media | Adjuntos en disco efímero de Vercel. | Supabase Storage, bucket privado `documents` sin políticas públicas (solo la API con la clave de servicio). |
+| Baja | 18 columnas de trazabilidad sin clave foránea; funciones con `search_path` mutable; Swagger público. | Claves foráneas `RESTRICT`, `search_path` fijo, Swagger apagado en producción. |
+
+### Verificado sin hallazgos
+
+- Contraseñas con argon2id (parámetros OWASP), tokens de sesión aleatorios de 256 bits guardados como hash, CSRF por sesión con comparación en tiempo constante, cookies `HttpOnly`, `Secure`, `SameSite=Strict`.
+- Autenticación obligatoria por defecto (guardia global); los endpoints sin permiso explícito solo devuelven listas mínimas para formularios.
+- Cierre por inactividad (2 h), revocación de sesiones al cambiar la contraseña y al desactivar el usuario; cambio de contraseña obligatorio en el primer ingreso.
+- Errores sin detalles internos; la bitácora excluye contraseñas, hashes y tokens; los logs ocultan cookies y cabeceras CSRF.
+- Validación de entrada con Zod; adjuntos validados por firma binaria, tipo y extensión.
+- Sin secretos en el historial de git. `npm audit`: frontend sin vulnerabilidades; backend con 1 moderada (`uuid` vía `exceljs`) no explotable en el uso que hace `exceljs`.
+
+### Configuración pendiente en los paneles (no se puede hacer desde el código)
+
+**Supabase**
+1. *Authentication → Sign In / Providers*: desactivar **Allow new users to sign up** (el sistema no usa Supabase Auth).
+2. *Settings → Database → SSL Configuration*: activar **Enforce SSL on incoming connections**.
+3. *Settings → Database → Network Restrictions*: si no se usa conexión directa desde otros equipos, restringir el acceso.
+4. *Settings → API → Data API*: desactivar la Data API o quitar `public` de los esquemas expuestos (defensa adicional al RLS).
+5. Contraseña de la base larga y aleatoria; guardarla solo en Vercel y en un gestor de contraseñas.
+6. Copias de seguridad: el plan gratuito no garantiza restauración puntual; programar un `pg_dump` periódico o activar PITR en un plan de pago.
+
+**Vercel**
+1. Variables `DATABASE_URL` y `SUPABASE_SERVICE_ROLE_KEY` marcadas como *Sensitive* y solo en el entorno *Production*.
+2. Activar la autenticación de dos factores en las cuentas de Vercel, Supabase y GitHub.
+3. *Deployment Protection* para las vistas previas (Preview) si contienen datos reales.
+
+**Operación**
+- Cambiar la contraseña temporal del usuario `admin` en el primer ingreso y crear usuarios nominales (no compartir `admin`).
+- Revisar la bitácora (`LOGIN_FALLIDO`, `LOGIN_BLOQUEADO_IP`, `RESTABLECER_CONTRASENA`) periódicamente.
