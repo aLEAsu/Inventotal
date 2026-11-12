@@ -39,6 +39,10 @@ async function save() {
   const base = { fullName: fv.fullName, email: fv.email, documentId: fv.documentId, position: fv.position, roleId: fv.roleId, areaIds: fv.areaIds, isTechnicalStaff: fv.isTechnicalStaff };
   const r = await n.run<unknown>(() => (fv.id ? http.patch(`/users/${fv.id}`, { ...base, isActive: fv.isActive }) : http.post('/users', { ...base, username: fv.username, password: fv.password })), fv.id ? 'Usuario actualizado' : 'Usuario creado. Deberá cambiar la contraseña en su primer ingreso.');
   if (r) {
+    const released = (r as { data?: { released?: { activities: number; programs: number; openWorkOrders: number } } }).data?.released;
+    if (released && (released.activities || released.programs || released.openWorkOrders)) {
+      n.info(`Usuario desactivado: ${released.activities} actividad(es) y ${released.programs} programa(s) quedaron sin responsable${released.openWorkOrders ? `; reasigne sus ${released.openWorkOrders} orden(es) abiertas` : ''}`);
+    }
     form.value.visible = false;
     await load();
     await cat.load(true);

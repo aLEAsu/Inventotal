@@ -65,6 +65,10 @@ export function summarizeStatus(statuses: DisplayStatus[]): DisplayStatus {
 }
 
 const EXCLUDED_PREFIX = 'Excluida en regeneración';
+/** Prefijo de periodKey de las actividades agregadas a mano (la regeneración nunca las excluye) */
+export const MANUAL_PERIOD_PREFIX = 'M:';
+
+export type BulkAction = 'RESCHEDULE' | 'ASSIGN' | 'CANCELADO' | 'NO_APLICA' | 'PROGRAMADO';
 
 @Injectable()
 export class PlansService {
@@ -125,6 +129,25 @@ export class PlansService {
       await tx.annualPlanEvent.create({ data: { planId: p.id, action: 'CREAR', toStatus: 'BORRADOR', version: 1, userId: ctx.user.id } });
       await this.audit.log(ctx, { action: 'CREAR', module: 'cronograma', entity: 'AnnualPlan', entityId: p.id, after: p }, tx);
       return p;
+    });
+  }
+
+  /** Edita el título y las observaciones del plan (no cambia actividades ni versión). */
+  async updatePlan(ctx: ReqCtx, year: number, data: { title?: string; notes?: string | null }) {
+    return this.prisma.$transaction(async (tx) => {
+      const p = await this.requirePlan(year, tx);
+      if (p.status === 'CERRADO') throw new ConflictException('El plan está cerrado; no admite cambios');
+      if (p.status !== 'BORRADOR' && !can(ctx.user, 'plans.approve')) throw new ForbiddenException('Modificar un plan en revisión o aprobado requiere el permiso plans.approve');
+      const patch: Prisma.AnnualPlanUpdateInput = {};
+      if (data.title !== undefined) patch.title = data.title.trim().toUpperCase();
+      if (data.notes !== undefined) patch.notes = data.notes?.trim() || null;
+      if (!Object.keys(patch).length) return p;
+      const updated = await tx.annualPlan.update({ where: { id: p.id }, data: patch });
+      const before = { title: p.title, notes: p.notes };
+      const after = { title: updated.title, notes: updated.notes };
+      await tx.annualPlanEvent.create({ data: { planId: p.id, action: 'EDITAR_DATOS', version: p.version, detail: { before, after }, userId: ctx.user.id } });
+      await this.audit.log(ctx, { action: 'EDITAR', module: 'cronograma', entity: 'AnnualPlan', entityId: p.id, before, after }, tx);
+      return updated;
     });
   }
 
@@ -320,7 +343,7 @@ export class PlansService {
         let reactivated = 0;
         if (!approved) {
           const obsolete = existing.filter(
-            (e) => !desired.has(`${e.programId}|${e.assetId}|${e.periodKey}`) && (e.status === 'PROGRAMADO' || e.status === 'REPROGRAMADO') && !e.workOrder,
+            (e) => !e.periodKey.startsWith(MANUAL_PERIOD_PREFIX) && !desired.has(`${e.programId}|${e.assetId}|${e.periodKey}`) && (e.status === 'PROGRAMADO' || e.status === 'REPROGRAMADO') && !e.workOrder,
           );
           if (obsolete.length) {
             const r = await tx.scheduledActivity.updateMany({
@@ -356,7 +379,7 @@ export class PlansService {
   }
 
   // -------------------------------------------------------------- Flujo documental
-  async transition(ctx: ReqCtx, year: number, action: 'SUBMIT' | 'RETURN' | 'APPROVE' | 'CLOSE' | 'REVIEW', reason?: string | null) {
+  async transition(ctx: ReqCtx, year: number, action: 'SUBMIT' | 'RETURN' | 'APPROVE' | 'CLOSE' | 'REVIEW' | 'REOPEN', reason?: string | null) {
     return this.prisma.$transaction(async (tx) => {
       const p = await this.requirePlan(year, tx);
       const rules: Record<typeof action, { from: PlanStatus[]; to: PlanStatus; perm: string }> = {
@@ -365,11 +388,13 @@ export class PlansService {
         RETURN: { from: ['EN_REVISION'], to: 'BORRADOR', perm: 'plans.approve' },
         APPROVE: { from: ['EN_REVISION'], to: 'APROBADO', perm: 'plans.approve' },
         CLOSE: { from: ['APROBADO'], to: 'CERRADO', perm: 'plans.close' },
+        // Reabre un plan aprobado para modificarlo: vuelve a borrador con una versión nueva; la línea base aprobada se conserva
+        REOPEN: { from: ['APROBADO'], to: 'BORRADOR', perm: 'plans.approve' },
       };
       const r = rules[action];
       if (!can(ctx.user, r.perm)) throw new ForbiddenException(`Requiere el permiso ${r.perm}`);
       if (!r.from.includes(p.status)) throw new ConflictException(`Acción no permitida en estado ${p.status}`);
-      if ((action === 'RETURN' || action === 'CLOSE') && (!reason || reason.trim().length < 10)) {
+      if ((action === 'RETURN' || action === 'CLOSE' || action === 'REOPEN') && (!reason || reason.trim().length < 10)) {
         throw new BadRequestException('Indique la justificación (mínimo 10 caracteres)');
       }
       const count = await tx.scheduledActivity.count({ where: { planId: p.id } });
@@ -387,6 +412,15 @@ export class PlansService {
         if (!p.reviewedById) Object.assign(data, { reviewedById: ctx.user.id, reviewedAt: now });
       }
       if (action === 'CLOSE') Object.assign(data, { closedById: ctx.user.id, closedAt: now });
+      if (action === 'REOPEN') {
+        // La nueva versión deberá revisarse y aprobarse de nuevo; la versión aprobada anterior queda en el historial
+        Object.assign(data, {
+          version: p.version + 1,
+          submittedBy: { disconnect: true }, submittedAt: null,
+          reviewedBy: { disconnect: true }, reviewedAt: null,
+          approvedBy: { disconnect: true }, approvedAt: null,
+        });
+      }
       const updated = await tx.annualPlan.update({ where: { id: p.id }, data });
       if (action === 'APPROVE') {
         // La línea base aprobada: originalDate queda protegida por trigger desde este momento.
@@ -738,7 +772,11 @@ export class PlansService {
    * - Plan APROBADO: queda PENDIENTE hasta su aprobación; si el solicitante tiene plans.approve puede aprobarse en el mismo acto.
    */
   async requestReschedule(ctx: ReqCtx, activityId: string, toDate: string, reason: string, autoApprove = false) {
-    return this.prisma.$transaction(async (tx) => {
+    return this.prisma.$transaction((tx) => this.rescheduleTx(tx, ctx, activityId, toDate, reason, autoApprove, true));
+  }
+
+  private async rescheduleTx(tx: Tx, ctx: ReqCtx, activityId: string, toDate: string, reason: string, autoApprove: boolean, bump: boolean) {
+    {
       const a = await tx.scheduledActivity.findUnique({ where: { id: activityId }, include: { plan: true, asset: true } });
       if (!a) throw new NotFoundException('Actividad no encontrada');
       assertAreaAccess(ctx.user, a.asset.areaId);
@@ -751,10 +789,18 @@ export class PlansService {
       if (pending) throw new ConflictException('Ya existe una solicitud de reprogramación pendiente para esta actividad');
 
       if (a.plan.status === 'BORRADOR') {
+        // Si el plan ya tuvo una versión aprobada (reabierto), la fecha aprobada se conserva y solo cambia la comprometida
+        const hasBaseline = (await tx.annualPlanVersion.count({ where: { planId: a.planId } })) > 0;
         const r = await tx.reschedule.create({
-          data: { activityId, fromDate: a.committedDate, toDate: parseYmd(toDate), reason, status: 'APROBADA', requestedById: ctx.user.id, decidedById: ctx.user.id, decidedAt: new Date(), decisionNote: 'Ajuste en borrador (sin línea base aprobada)' },
+          data: { activityId, fromDate: a.committedDate, toDate: parseYmd(toDate), reason, status: 'APROBADA', requestedById: ctx.user.id, decidedById: ctx.user.id, decidedAt: new Date(), decisionNote: hasBaseline ? 'Ajuste en borrador (plan reabierto: se conserva la fecha aprobada)' : 'Ajuste en borrador (sin línea base aprobada)' },
         });
-        await tx.scheduledActivity.update({ where: { id: activityId }, data: { originalDate: parseYmd(toDate), committedDate: parseYmd(toDate) } });
+        await tx.scheduledActivity.update({
+          where: { id: activityId },
+          data: hasBaseline
+            ? { committedDate: parseYmd(toDate), status: fmtYmd(a.originalDate) === toDate ? 'PROGRAMADO' : 'REPROGRAMADO' }
+            : { originalDate: parseYmd(toDate), committedDate: parseYmd(toDate) },
+        });
+        await this.syncWorkOrderDate(tx, activityId, toDate);
         await tx.annualPlanEvent.create({ data: { planId: a.planId, action: 'AJUSTE_BORRADOR', version: a.plan.version, detail: { activityId, from: fmtYmd(a.committedDate), to: toDate }, reason, userId: ctx.user.id } });
         await this.audit.log(ctx, { action: 'REPROGRAMAR', module: 'cronograma', entity: 'ScheduledActivity', entityId: activityId, before: { committedDate: fmtYmd(a.committedDate) }, after: { committedDate: toDate }, reason }, tx);
         return { ...r, applied: true };
@@ -763,17 +809,17 @@ export class PlansService {
       const r = await tx.reschedule.create({ data: { activityId, fromDate: a.committedDate, toDate: parseYmd(toDate), reason, requestedById: ctx.user.id } });
       await this.audit.log(ctx, { action: 'SOLICITAR_REPROGRAMACION', module: 'cronograma', entity: 'Reschedule', entityId: r.id, after: { activityId, from: fmtYmd(a.committedDate), to: toDate }, reason }, tx);
       if (autoApprove && can(ctx.user, 'plans.approve')) {
-        return this.applyDecision(tx, ctx, r.id, true, 'Aprobada por el coordinador al solicitarla');
+        return this.applyDecision(tx, ctx, r.id, true, 'Aprobada por el coordinador al solicitarla', bump);
       }
       return { ...r, applied: false };
-    });
+    }
   }
 
   async decideReschedule(ctx: ReqCtx, id: string, approve: boolean, note?: string | null) {
     return this.prisma.$transaction((tx) => this.applyDecision(tx, ctx, id, approve, note));
   }
 
-  private async applyDecision(tx: Tx, ctx: ReqCtx, id: string, approve: boolean, note?: string | null) {
+  private async applyDecision(tx: Tx, ctx: ReqCtx, id: string, approve: boolean, note?: string | null, bump = true) {
     const r = await tx.reschedule.findUnique({ where: { id }, include: { activity: { include: { plan: true } } } });
     if (!r) throw new NotFoundException('Solicitud no encontrada');
     if (r.status !== 'PENDIENTE') throw new ConflictException('La solicitud ya fue decidida');
@@ -785,14 +831,24 @@ export class PlansService {
       data: { status: approve ? 'APROBADA' : 'RECHAZADA', decidedById: ctx.user.id, decidedAt: new Date(), decisionNote: note ?? null },
     });
     if (approve) {
+      if (a.plan.status === 'CERRADO') throw new ConflictException('El plan está cerrado');
       await tx.scheduledActivity.update({ where: { id: a.id }, data: { committedDate: r.toDate, status: 'REPROGRAMADO' } });
-      await this.bumpVersionIfApproved(tx, a.planId, ctx.user.id, 'REPROGRAMACION', { activityId: a.id, originalDate: fmtYmd(a.originalDate), from: fmtYmd(r.fromDate), to: fmtYmd(r.toDate), rescheduleId: id }, r.reason);
+      await this.syncWorkOrderDate(tx, a.id, fmtYmd(r.toDate));
+      if (bump) await this.bumpVersionIfApproved(tx, a.planId, ctx.user.id, 'REPROGRAMACION', { activityId: a.id, originalDate: fmtYmd(a.originalDate), from: fmtYmd(r.fromDate), to: fmtYmd(r.toDate), rescheduleId: id }, r.reason);
     }
     await this.audit.log(ctx, {
       action: approve ? 'APROBAR_REPROGRAMACION' : 'RECHAZAR_REPROGRAMACION', module: 'cronograma', entity: 'Reschedule', entityId: id,
       before: { committedDate: fmtYmd(a.committedDate) }, after: approve ? { committedDate: fmtYmd(r.toDate), originalDate: fmtYmd(a.originalDate) } : { rechazada: true }, reason: note ?? r.reason,
     }, tx);
     return { ...decided, applied: approve };
+  }
+
+  /** La orden de trabajo abierta de una actividad reprogramada adopta la nueva fecha */
+  private async syncWorkOrderDate(tx: Tx, activityId: string, date: string) {
+    await tx.workOrder.updateMany({
+      where: { activityId, status: { in: ['ABIERTA', 'ASIGNADA', 'EN_EJECUCION', 'PENDIENTE_REPUESTOS', 'PENDIENTE_PROVEEDOR'] } },
+      data: { scheduledDate: parseYmd(date), dueDate: parseYmd(date) },
+    });
   }
 
   async pendingReschedules(ctx: ReqCtx) {
@@ -810,31 +866,162 @@ export class PlansService {
 
   // -------------------------------------------------------------- Otras acciones sobre actividades
   async setActivityStatus(ctx: ReqCtx, activityId: string, status: 'CANCELADO' | 'NO_APLICA' | 'PROGRAMADO', reason: string) {
-    return this.prisma.$transaction(async (tx) => {
+    return this.prisma.$transaction((tx) => this.setStatusTx(tx, ctx, activityId, status, reason, true));
+  }
+
+  private async setStatusTx(tx: Tx, ctx: ReqCtx, activityId: string, status: 'CANCELADO' | 'NO_APLICA' | 'PROGRAMADO', reason: string, bump: boolean) {
+    {
       const a = await tx.scheduledActivity.findUnique({ where: { id: activityId }, include: { plan: true, asset: true, workOrder: true } });
       if (!a) throw new NotFoundException('Actividad no encontrada');
       assertAreaAccess(ctx.user, a.asset.areaId);
       if (a.plan.status === 'EN_REVISION') throw new ConflictException('El plan está en revisión');
+      if (a.plan.status === 'CERRADO') throw new ConflictException('El plan está cerrado; no admite cambios');
+      if (a.status === status) throw new ConflictException('La actividad ya tiene ese estado');
       if (a.status === 'EJECUTADO' || a.status === 'EN_EJECUCION') throw new ConflictException('No se puede cambiar el estado de una actividad ejecutada o en ejecución');
       if (status === 'PROGRAMADO' && !['CANCELADO', 'NO_APLICA'].includes(a.status)) throw new ConflictException('Solo se pueden restituir actividades canceladas o no aplicables');
       if (a.workOrder && !['CANCELADA'].includes(a.workOrder.status)) throw new ConflictException('La actividad tiene una orden de trabajo activa; cancele primero la orden');
       if (a.plan.status === 'APROBADO' && !can(ctx.user, 'plans.approve')) throw new ForbiddenException('Modificar un plan aprobado requiere el permiso plans.approve');
       const restored: ActivityStatus = status === 'PROGRAMADO' ? (fmtYmd(a.originalDate) !== fmtYmd(a.committedDate) ? 'REPROGRAMADO' : 'PROGRAMADO') : status;
       const updated = await tx.scheduledActivity.update({ where: { id: activityId }, data: { status: restored, statusReason: reason } });
-      await this.bumpVersionIfApproved(tx, a.planId, ctx.user.id, `ACTIVIDAD_${status}`, { activityId, from: a.status, to: restored }, reason);
+      if (bump) await this.bumpVersionIfApproved(tx, a.planId, ctx.user.id, `ACTIVIDAD_${status}`, { activityId, from: a.status, to: restored }, reason);
       await this.audit.log(ctx, { action: `ACTIVIDAD_${status}`, module: 'cronograma', entity: 'ScheduledActivity', entityId: activityId, before: { status: a.status }, after: { status: restored }, reason }, tx);
       return updated;
-    });
+    }
   }
 
   async assignResponsible(ctx: ReqCtx, activityId: string, userId: string | null) {
+    return this.prisma.$transaction((tx) => this.assignTx(tx, ctx, activityId, userId));
+  }
+
+  private async assignTx(tx: Tx, ctx: ReqCtx, activityId: string, userId: string | null) {
+    const a = await tx.scheduledActivity.findUnique({ where: { id: activityId }, include: { asset: true, plan: { select: { status: true } } } });
+    if (!a) throw new NotFoundException('Actividad no encontrada');
+    assertAreaAccess(ctx.user, a.asset.areaId);
+    if (a.plan.status === 'CERRADO') throw new ConflictException('El plan está cerrado; no admite cambios');
+    if (['EJECUTADO', 'CANCELADO', 'NO_APLICA'].includes(a.status)) throw new ConflictException('No se puede cambiar el responsable de una actividad ejecutada, cancelada o no aplicable');
+    if (userId) {
+      const u = await tx.user.findUnique({ where: { id: userId }, select: { isActive: true } });
+      if (!u?.isActive) throw new BadRequestException('El responsable debe ser un usuario activo');
+    }
+    if (a.responsibleId === userId) return a;
+    const r = await tx.scheduledActivity.update({ where: { id: activityId }, data: { responsibleId: userId } });
+    await this.audit.log(ctx, { action: 'ASIGNAR_RESPONSABLE', module: 'cronograma', entity: 'ScheduledActivity', entityId: activityId, before: { responsibleId: a.responsibleId }, after: { responsibleId: userId } }, tx);
+    return r;
+  }
+
+  /**
+   * Edición en lote de actividades del cronograma (p. ej. todos los equipos de un grupo en una fecha):
+   * reprogramar, asignar responsable, cancelar, marcar no aplica o restituir. Todo o nada, en una transacción;
+   * en un plan aprobado la versión sube una sola vez.
+   */
+  async bulk(ctx: ReqCtx, year: number, ids: string[], action: BulkAction, opts: { toDate?: string; responsibleId?: string | null; reason?: string | null; autoApprove?: boolean }) {
+    const unique = [...new Set(ids)];
+    if (!unique.length) throw new BadRequestException('Seleccione al menos una actividad');
+    const reason = opts.reason?.trim() ?? '';
+    if (action !== 'ASSIGN' && reason.length < 10) throw new BadRequestException('Indique la justificación (mínimo 10 caracteres)');
+    if (action === 'RESCHEDULE' && !opts.toDate) throw new BadRequestException('Indique la nueva fecha');
+    if (action === 'RESCHEDULE' && !can(ctx.user, 'schedule.reschedule')) throw new ForbiddenException('Requiere el permiso schedule.reschedule');
+    if (action === 'ASSIGN' && !can(ctx.user, 'schedule.assign')) throw new ForbiddenException('Requiere el permiso schedule.assign');
+    if (['CANCELADO', 'NO_APLICA', 'PROGRAMADO'].includes(action) && !can(ctx.user, 'plans.generate') && !can(ctx.user, 'plans.approve')) {
+      throw new ForbiddenException('Requiere el permiso plans.generate o plans.approve');
+    }
+    return this.prisma.$transaction(
+      async (tx) => {
+        const plan = await this.requirePlan(year, tx);
+        const found = await tx.scheduledActivity.count({ where: { id: { in: unique }, planId: plan.id } });
+        if (found !== unique.length) throw new BadRequestException(`Hay actividades que no pertenecen al plan ${year}`);
+        let applied = 0;
+        let pendingApproval = 0;
+        for (const id of unique) {
+          if (action === 'RESCHEDULE') {
+            const a = await tx.scheduledActivity.findUniqueOrThrow({ where: { id }, select: { committedDate: true } });
+            if (fmtYmd(a.committedDate) === opts.toDate) continue; // ya está en esa fecha
+            const r = await this.rescheduleTx(tx, ctx, id, opts.toDate!, reason, !!opts.autoApprove, false);
+            if (r.applied) applied++;
+            else pendingApproval++;
+          } else if (action === 'ASSIGN') {
+            await this.assignTx(tx, ctx, id, opts.responsibleId ?? null);
+            applied++;
+          } else {
+            await this.setStatusTx(tx, ctx, id, action, reason, false);
+            applied++;
+          }
+        }
+        const versionAction = action === 'RESCHEDULE' ? 'REPROGRAMACION_LOTE' : action === 'ASSIGN' ? null : `ACTIVIDADES_${action}`;
+        if (versionAction && applied > 0) {
+          await this.bumpVersionIfApproved(tx, plan.id, ctx.user.id, versionAction, { count: applied, activityIds: unique, toDate: opts.toDate ?? null }, reason);
+        }
+        return { total: unique.length, applied, pendingApproval };
+      },
+      { timeout: 60_000, maxWait: 10_000 },
+    );
+  }
+
+  /**
+   * Agrega una actividad puntual al cronograma (p. ej. un mantenimiento adicional o un correctivo planificado).
+   * El equipo debe pertenecer al alcance del programa. Nunca la excluye una regeneración posterior.
+   */
+  async addActivity(ctx: ReqCtx, year: number, input: { programId: string; assetId: string; date: string; reason: string; responsibleId?: string | null }) {
+    if (Number(input.date.slice(0, 4)) !== year) throw new BadRequestException(`La fecha debe pertenecer al año del plan (${year})`);
     return this.prisma.$transaction(async (tx) => {
-      const a = await tx.scheduledActivity.findUniqueOrThrow({ where: { id: activityId }, include: { asset: true } });
-      assertAreaAccess(ctx.user, a.asset.areaId);
-      if (userId) await tx.user.findUniqueOrThrow({ where: { id: userId } });
-      const r = await tx.scheduledActivity.update({ where: { id: activityId }, data: { responsibleId: userId } });
-      await this.audit.log(ctx, { action: 'ASIGNAR_RESPONSABLE', module: 'cronograma', entity: 'ScheduledActivity', entityId: activityId, before: { responsibleId: a.responsibleId }, after: { responsibleId: userId } }, tx);
-      return r;
+      const plan = await this.requirePlan(year, tx);
+      if (plan.status === 'CERRADO') throw new ConflictException('El plan está cerrado; no admite cambios');
+      if (plan.status === 'EN_REVISION') throw new ConflictException('El plan está en revisión; devuélvalo a borrador para modificarlo');
+      const approved = plan.status === 'APROBADO';
+      if (approved && !can(ctx.user, 'plans.approve')) throw new ForbiddenException('Modificar un plan aprobado requiere el permiso plans.approve');
+      const p = await tx.maintenanceProgram.findUnique({
+        where: { id: input.programId },
+        include: {
+          category: { select: { name: true } },
+          extraCategories: { select: { category: { select: { id: true, name: true } } } },
+          subcategory: { select: { name: true } },
+          group: { select: { name: true, assets: { select: { assetId: true } } } },
+          supplier: { select: { name: true } },
+        },
+      });
+      if (!p) throw new NotFoundException('Programa no encontrado');
+      if (!p.isActive) throw new ConflictException('El programa está inactivo');
+      const asset = await tx.asset.findUnique({ where: { id: input.assetId }, include: { area: true, category: true } });
+      if (!asset) throw new NotFoundException('Equipo no encontrado');
+      assertAreaAccess(ctx.user, asset.areaId);
+      if (INACTIVE_STATUSES.includes(asset.status)) throw new ConflictException('El equipo está retirado o dado de baja');
+      if (asset.decommissionedAt && input.date >= fmtYmd(asset.decommissionedAt)) throw new ConflictException('La fecha es posterior a la baja del equipo');
+      const inScope = p.targetType === 'ACTIVO' ? p.assetId === asset.id
+        : p.targetType === 'CATEGORIA' ? programCategoryIds(p).includes(asset.categoryId)
+          : p.targetType === 'SUBCATEGORIA' ? p.subcategoryId === asset.subcategoryId
+            : !!p.group?.assets.some((m) => m.assetId === asset.id);
+      if (!inScope) throw new BadRequestException('El equipo no pertenece al grupo de este programa');
+      const sameDay = await tx.scheduledActivity.findFirst({
+        where: { planId: plan.id, programId: p.id, assetId: asset.id, committedDate: parseYmd(input.date), status: { notIn: ['CANCELADO', 'NO_APLICA'] } },
+        select: { id: true },
+      });
+      if (sameDay) throw new ConflictException('Ya existe una actividad de este programa para el equipo en esa fecha');
+      const responsibleId = input.responsibleId === undefined ? p.responsibleId : input.responsibleId;
+      if (responsibleId) {
+        const u = await tx.user.findUnique({ where: { id: responsibleId }, select: { isActive: true } });
+        if (!u?.isActive) throw new BadRequestException('El responsable debe ser un usuario activo');
+      }
+      const targetName = p.targetType === 'ACTIVO' ? p.name
+        : p.targetType === 'CATEGORIA' ? [p.category?.name, ...p.extraCategories.map((x) => x.category.name)].filter(Boolean).join(' + ')
+          : p.targetType === 'SUBCATEGORIA' ? p.subcategory?.name : p.group?.name;
+      const created = await tx.scheduledActivity.create({
+        data: {
+          planId: plan.id, programId: p.id, assetId: asset.id, periodKey: `${MANUAL_PERIOD_PREFIX}${input.date}:${Date.now().toString(36)}`,
+          originalDate: parseYmd(input.date), committedDate: parseYmd(input.date), status: 'PROGRAMADO',
+          responsibleId: responsibleId ?? null, addedAfterApproval: approved, statusReason: `Agregada manualmente: ${input.reason}`,
+          programSnapshot: {
+            programCode: p.code, programName: p.name, kind: p.kind, frequencyType: p.frequencyType, frequencyLabel: describeRule(p),
+            programVersion: p.version, assetCode: asset.code, assetName: asset.name, areaName: asset.area.name, categoryName: asset.category.name,
+            supplierName: p.supplier?.name ?? null, targetType: p.targetType, targetName: targetName ?? null, displayMode: p.displayMode,
+            estimatedDurationMin: p.estimatedDurationMin, manual: true,
+          },
+        },
+      });
+      const detail = { activityId: created.id, programCode: p.code, assetCode: asset.code, date: input.date };
+      if (approved) await this.bumpVersionIfApproved(tx, plan.id, ctx.user.id, 'AGREGAR_ACTIVIDAD', detail, input.reason);
+      else await tx.annualPlanEvent.create({ data: { planId: plan.id, action: 'AGREGAR_ACTIVIDAD', version: plan.version, detail, reason: input.reason, userId: ctx.user.id } });
+      await this.audit.log(ctx, { action: 'AGREGAR_ACTIVIDAD', module: 'cronograma', entity: 'ScheduledActivity', entityId: created.id, after: detail, reason: input.reason }, tx);
+      return created;
     });
   }
 

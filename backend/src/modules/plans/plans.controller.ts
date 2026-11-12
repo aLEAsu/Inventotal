@@ -1,4 +1,4 @@
-import { Controller, Get, Param, ParseIntPipe, ParseUUIDPipe, Post, Res } from '@nestjs/common';
+import { Controller, Get, Param, ParseIntPipe, ParseUUIDPipe, Patch, Post, Res } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { z } from 'zod';
@@ -39,6 +39,16 @@ const RescheduleReq = z.object({ toDate: zYmd, reason: zReason, autoApprove: z.b
 const Decision = z.object({ approve: z.boolean(), note: zOptText(2000) });
 const ActStatus = z.object({ status: z.enum(['CANCELADO', 'NO_APLICA', 'PROGRAMADO']), reason: zReason });
 const Assign = z.object({ responsibleId: zOptUuid });
+const UpdatePlan = z.object({ title: z.string().trim().min(5).max(200).optional(), notes: z.string().trim().max(2000).nullable().optional() });
+const Bulk = z.object({
+  ids: z.array(z.string().uuid()).min(1).max(500),
+  action: z.enum(['RESCHEDULE', 'ASSIGN', 'CANCELADO', 'NO_APLICA', 'PROGRAMADO']),
+  toDate: zYmd.optional(),
+  responsibleId: zOptUuid,
+  reason: zOptText(2000),
+  autoApprove: z.boolean().default(false),
+});
+const AddActivity = z.object({ programId: z.string().uuid(), assetId: z.string().uuid(), date: zYmd, reason: zReason, responsibleId: z.string().uuid().nullable().optional() });
 
 @ApiTags('Cronograma anual')
 @Controller()
@@ -74,6 +84,13 @@ export class PlansController {
     return this.svc.createPlan(ctx, year, b.notes);
   }
 
+  @Patch('plans/:year')
+  @Perms('plans.generate')
+  @ApiZBody(UpdatePlan)
+  update(@Ctx() ctx: ReqCtx, @Param('year', ParseIntPipe) year: number, @ZBody(UpdatePlan) b: z.infer<typeof UpdatePlan>) {
+    return this.svc.updatePlan(ctx, year, b);
+  }
+
   @Post('plans/:year/generate')
   @Perms('plans.generate')
   @ApiZBody(Generate)
@@ -101,6 +118,11 @@ export class PlansController {
   approve(@Ctx() ctx: ReqCtx, @Param('year', ParseIntPipe) year: number, @ZBody(Transition) b: z.infer<typeof Transition>) {
     return this.svc.transition(ctx, year, 'APPROVE', b.reason);
   }
+  @Post('plans/:year/reopen')
+  @Perms('plans.approve')
+  reopen(@Ctx() ctx: ReqCtx, @Param('year', ParseIntPipe) year: number, @ZBody(Transition) b: z.infer<typeof Transition>) {
+    return this.svc.transition(ctx, year, 'REOPEN', b.reason);
+  }
   @Post('plans/:year/close')
   @Perms('plans.close')
   close(@Ctx() ctx: ReqCtx, @Param('year', ParseIntPipe) year: number, @ZBody(Transition) b: z.infer<typeof Transition>) {
@@ -113,6 +135,21 @@ export class PlansController {
   activities(@Ctx() ctx: ReqCtx, @Param('year', ParseIntPipe) year: number, @ZQuery(ListQuery) q: z.infer<typeof ListQuery>) {
     const { page, pageSize, sort, dir, ...f } = q;
     return this.svc.activities(ctx, year, f, page, pageSize, sort, dir);
+  }
+
+  @Post('plans/:year/activities')
+  @Perms('plans.generate')
+  @ApiZBody(AddActivity)
+  addActivity(@Ctx() ctx: ReqCtx, @Param('year', ParseIntPipe) year: number, @ZBody(AddActivity) b: z.infer<typeof AddActivity>) {
+    return this.svc.addActivity(ctx, year, b);
+  }
+
+  /** Edición en lote (permisos por acción validados en el servicio) */
+  @Post('plans/:year/activities/bulk')
+  @AnyPerms('schedule.reschedule', 'schedule.assign', 'plans.generate', 'plans.approve')
+  @ApiZBody(Bulk)
+  bulk(@Ctx() ctx: ReqCtx, @Param('year', ParseIntPipe) year: number, @ZBody(Bulk) b: z.infer<typeof Bulk>) {
+    return this.svc.bulk(ctx, year, b.ids, b.action, b);
   }
 
   @Get('plans/:year/matrix')

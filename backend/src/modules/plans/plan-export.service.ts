@@ -2,10 +2,11 @@ import { Injectable } from '@nestjs/common';
 import ExcelJS from 'exceljs';
 import type { ReqCtx } from '../../common/auth.types';
 import { fmtDateTimeBogota, fmtDMY, MONTHS_ES, MONTHS_ES_SHORT } from '../../common/dates';
+import { addExcelLogos } from '../../common/excel-brand';
 import { InstitutionalPdf } from '../../common/pdf';
 import { PrismaService } from '../../common/prisma.service';
 import { SettingsService } from '../../common/settings.service';
-import { ActivityFilters, DISPLAY_STATUS_LABELS, DisplayStatus, MatrixView, PlansService, SCHEDULE_TYPE_LABEL } from './plans.service';
+import { ActivityFilters, DISPLAY_STATUS_LABELS, DisplayStatus, MatrixView, PlansService, SCHEDULE_TYPE_LABEL, summarizeStatus } from './plans.service';
 
 export const STATUS_SYMBOL: Record<DisplayStatus, string> = {
   PROGRAMADO: 'P', PROXIMO: 'X', EN_EJECUCION: 'E', EJECUTADO: '✓', VENCIDO: 'V', REPROGRAMADO: 'R', CANCELADO: 'C', NO_APLICA: 'NA',
@@ -20,7 +21,8 @@ type MatrixCellLike = { day: number; status: DisplayStatus; count: number; execu
 /** Texto de una celda: día del mes; en filas agrupadas, equipos ejecutados / equipos programados. */
 const cellText = (x: MatrixCellLike, grouped: boolean, symbols: Record<DisplayStatus, string> = PDF_SYMBOL) =>
   grouped ? `${x.day} · ${x.executed ? `${x.executed}/${x.count}` : x.count}${x.rescheduled ? ' R' : ''}` : `${x.day}${symbols[x.status]}`;
-const monthStatus = (cell: MatrixCellLike[]) => (cell.length ? cell[cell.length - 1].status : null);
+/** Color del mes: el estado más urgente entre sus fechas */
+const monthStatus = (cell: MatrixCellLike[]) => (cell.length ? summarizeStatus(cell.map((x) => x.status)) : null);
 const PLAN_STATUS_LABEL: Record<string, string> = { BORRADOR: 'Borrador', EN_REVISION: 'En revisión', APROBADO: 'Aprobado', CERRADO: 'Cerrado' };
 
 const hex = (rgb: [number, number, number]) => 'FF' + rgb.map((c) => c.toString(16).padStart(2, '0')).join('').toUpperCase();
@@ -241,6 +243,7 @@ export class PlanExportService {
       ws.mergeCells(1, 1, 1, cols);
       ws.getCell(1, 1).value = c.institution;
       ws.getCell(1, 1).font = { bold: true, size: 13, color: { argb: brand } };
+      addExcelLogos(wb, ws, cols);
       ws.mergeCells(2, 1, 2, cols);
       ws.getCell(2, 1).value = `${scheduleTitle(f, c.plan.title)} ${year} — ${sub}`;
       ws.getCell(2, 1).font = { bold: true, size: 12 };

@@ -47,7 +47,7 @@ async function logout() {
   <div class="shell" :class="{ open }">
     <aside class="sidebar no-print" aria-label="Menú principal">
       <div class="brand">
-        <div class="logo">{{ cat.shortName.slice(0, 4) }}</div>
+        <img class="logo" src="/brand/mark.png" alt="" />
         <div>
           <div class="bname">{{ cat.shortName }}</div>
           <div class="binst" :title="cat.institution">{{ cat.institution }}</div>
@@ -82,7 +82,7 @@ async function logout() {
 .shell { display: flex; min-height: 100vh; }
 .sidebar { width: var(--sidebar-w); background: var(--app-sidebar); color: var(--app-sidebar-text); position: fixed; inset: 0 auto 0 0; overflow-y: auto; z-index: 30; display: flex; flex-direction: column; }
 .brand { display: flex; gap: 10px; align-items: center; padding: 16px 14px 8px; }
-.logo { width: 40px; height: 40px; border-radius: 9px; background: var(--p-primary-500); color: #fff; display: grid; place-items: center; font-weight: 700; font-size: 0.78rem; letter-spacing: 0.03em; flex: none; }
+.logo { width: 40px; height: 40px; border-radius: 9px; background: #fff; object-fit: contain; padding: 2px; flex: none; }
 .bname { color: #fff; font-weight: 700; }
 .binst { font-size: 0.75rem; opacity: 0.8; max-width: 170px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .scope { font-size: 0.72rem; margin: 0 14px 10px; padding: 6px 8px; border-radius: 6px; background: rgba(255, 255, 255, 0.06); }

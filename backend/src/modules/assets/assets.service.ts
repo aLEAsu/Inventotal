@@ -173,7 +173,10 @@ export class AssetsService {
       assertAreaAccess(ctx.user, before.areaId);
       if (b.areaId) assertAreaAccess(ctx.user, b.areaId);
       if (before.status === 'DADO_DE_BAJA') throw new ConflictException('Un activo dado de baja no puede modificarse');
-      await this.validateRefs(tx, b);
+      // La subcategoría siempre debe pertenecer a la categoría vigente del activo
+      const categoryId = b.categoryId ?? before.categoryId;
+      if (b.subcategoryId === undefined && b.categoryId && b.categoryId !== before.categoryId && before.subcategoryId) b.subcategoryId = null;
+      await this.validateRefs(tx, { ...b, categoryId });
       const data: Prisma.AssetUncheckedUpdateInput = this.toData(b);
       if (b.code !== undefined && b.code) data.code = b.code.trim().toUpperCase();
       if (b.categoryId) data.categoryId = b.categoryId;
@@ -231,14 +234,13 @@ export class AssetsService {
     return this.prisma.$transaction(async (tx) => {
       const a = await tx.asset.findUniqueOrThrow({ where: { id } });
       assertAreaAccess(ctx.user, a.areaId);
-      const [wo, act, fr, docs, prog, hist] = await Promise.all([
-        tx.workOrder.count({ where: { assetId: id } }),
-        tx.scheduledActivity.count({ where: { assetId: id } }),
-        tx.failureReport.count({ where: { assetId: id } }),
-        tx.document.count({ where: { assetId: id } }),
-        tx.maintenanceProgram.count({ where: { assetId: id } }),
-        tx.assetStatusHistory.count({ where: { assetId: id } }),
-      ]);
+      // Consultas secuenciales: una transacción usa una sola conexión
+      const wo = await tx.workOrder.count({ where: { assetId: id } });
+      const act = await tx.scheduledActivity.count({ where: { assetId: id } });
+      const fr = await tx.failureReport.count({ where: { assetId: id } });
+      const docs = await tx.document.count({ where: { assetId: id } });
+      const prog = await tx.maintenanceProgram.count({ where: { assetId: id } });
+      const hist = await tx.assetStatusHistory.count({ where: { assetId: id } });
       if (wo + act + fr + docs + prog + hist > 0) {
         throw new ConflictException('El activo tiene historial (programas, actividades, órdenes, fallas o documentos). Use la baja lógica.');
       }

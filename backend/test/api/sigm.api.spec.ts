@@ -744,6 +744,144 @@ describe('14. Hoja de vida, 16. indicadores y 17. años anteriores', () => {
     expect(list.body.map((p: { year: number }) => p.year)).toEqual([YEAR + 1, YEAR, YEAR - 1]);
   });
 
+  it('edita los datos del plan (título y observaciones) con trazabilidad', async () => {
+    const Y = YEAR + 1;
+    expect((await c.tech.patch(`/plans/${Y}`, { notes: 'x' })).status).toBe(403);
+    const r = await c.coord.patch(`/plans/${Y}`, { title: 'Plan anual de mantenimiento de TI', notes: 'Alcance: sede principal' });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ title: 'PLAN ANUAL DE MANTENIMIENTO DE TI', notes: 'Alcance: sede principal' });
+    // enviar solo el título no borra las observaciones
+    await c.coord.patch(`/plans/${Y}`, { title: 'Plan anual de mantenimiento' });
+    expect((await c.coord.get(`/plans/${Y}`)).body.plan.notes).toBe('Alcance: sede principal');
+    const h = await c.coord.get(`/plans/${Y}/history`);
+    expect(h.body.events.some((e: { action: string }) => e.action === 'EDITAR_DATOS')).toBe(true);
+  });
+
+  it('agrega una actividad puntual que la regeneración no excluye y valida el alcance del programa', async () => {
+    const Y = YEAR + 1;
+    const base = await prisma.scheduledActivity.findFirstOrThrow({ where: { plan: { year: Y }, program: { targetType: 'ACTIVO' } }, include: { program: true } });
+    const other = await prisma.asset.findFirstOrThrow({ where: { id: { not: base.assetId }, status: { notIn: ['DADO_DE_BAJA', 'RETIRADO'] } } });
+    const date = `${Y}-06-17`;
+    expect((await c.coord.post(`/plans/${Y}/activities`, { programId: base.programId, assetId: other.id, date, reason: 'Mantenimiento adicional solicitado' })).status).toBe(400);
+    expect((await c.coord.post(`/plans/${Y}/activities`, { programId: base.programId, assetId: base.assetId, date: `${YEAR}-06-17`, reason: 'Mantenimiento adicional solicitado' })).status).toBe(400);
+    const add = await c.coord.post(`/plans/${Y}/activities`, { programId: base.programId, assetId: base.assetId, date, reason: 'Mantenimiento adicional solicitado' });
+    expect(add.status).toBe(201);
+    expect((await c.coord.post(`/plans/${Y}/activities`, { programId: base.programId, assetId: base.assetId, date, reason: 'Mantenimiento adicional duplicado' })).status).toBe(409);
+    await c.coord.post(`/plans/${Y}/generate`, {});
+    const after = await prisma.scheduledActivity.findUniqueOrThrow({ where: { id: add.body.id } });
+    expect(after.status).toBe('PROGRAMADO');
+    expect(after.committedDate.toISOString().slice(0, 10)).toBe(date);
+  });
+
+  it('edita en lote los equipos de una fecha: fecha, responsable, no aplica y restitución', async () => {
+    const Y = YEAR + 1;
+    const acts = await prisma.scheduledActivity.findMany({ where: { plan: { year: Y }, status: 'PROGRAMADO' }, take: 2, orderBy: { committedDate: 'asc' } });
+    const idsBulk = acts.map((a) => a.id);
+    const toDate = `${Y}-11-20`;
+    expect((await c.coord.post(`/plans/${Y}/activities/bulk`, { ids: idsBulk, action: 'RESCHEDULE', toDate, reason: 'corto' })).status).toBe(400);
+    expect((await c.req.post(`/plans/${Y}/activities/bulk`, { ids: idsBulk, action: 'NO_APLICA', reason: 'Sin permiso para esto' })).status).toBe(403);
+    const r = await c.coord.post(`/plans/${Y}/activities/bulk`, { ids: idsBulk, action: 'RESCHEDULE', toDate, reason: 'Se agrupa la intervención del grupo' });
+    expect(r.status).toBe(201);
+    expect(r.body).toMatchObject({ total: 2, applied: 2, pendingApproval: 0 });
+    for (const id of idsBulk) {
+      const a = await prisma.scheduledActivity.findUniqueOrThrow({ where: { id } });
+      expect(a.committedDate.toISOString().slice(0, 10)).toBe(toDate);
+    }
+    const as = await c.coord.post(`/plans/${Y}/activities/bulk`, { ids: idsBulk, action: 'ASSIGN', responsibleId: ctx.users.tech.id });
+    expect(as.body.applied).toBe(2);
+    expect(await prisma.scheduledActivity.count({ where: { id: { in: idsBulk }, responsibleId: ctx.users.tech.id } })).toBe(2);
+    await c.coord.post(`/plans/${Y}/activities/bulk`, { ids: idsBulk, action: 'NO_APLICA', reason: 'Equipos en préstamo a otra sede' });
+    expect(await prisma.scheduledActivity.count({ where: { id: { in: idsBulk }, status: 'NO_APLICA' } })).toBe(2);
+    await c.coord.post(`/plans/${Y}/activities/bulk`, { ids: idsBulk, action: 'PROGRAMADO', reason: 'Los equipos regresaron a la sede' });
+    expect(await prisma.scheduledActivity.count({ where: { id: { in: idsBulk }, status: 'PROGRAMADO' } })).toBe(2);
+    // actividades de otro año: se rechaza todo el lote
+    const foreign = await prisma.scheduledActivity.findFirstOrThrow({ where: { plan: { year: YEAR } } });
+    expect((await c.coord.post(`/plans/${Y}/activities/bulk`, { ids: [idsBulk[0], foreign.id], action: 'ASSIGN', responsibleId: null })).status).toBe(400);
+  });
+
+  it('reabre un plan aprobado para modificarlo conservando la línea base y lo aprueba de nuevo', async () => {
+    const Y = YEAR + 1;
+    expect((await c.coord.post(`/plans/${Y}/submit`)).status).toBe(201);
+    expect((await c.coord.post(`/plans/${Y}/approve`, { reason: 'Aprobación inicial' })).status).toBe(201);
+    expect((await c.tech.post(`/plans/${Y}/reopen`, { reason: 'Ajustes solicitados por la gerencia' })).status).toBe(403);
+    expect((await c.coord.post(`/plans/${Y}/reopen`, { reason: 'corto' })).status).toBe(400);
+    const re = await c.coord.post(`/plans/${Y}/reopen`, { reason: 'Ajustes solicitados por la gerencia' });
+    expect(re.status).toBe(201);
+    const plan = (await c.coord.get(`/plans/${Y}`)).body.plan;
+    expect(plan).toMatchObject({ status: 'BORRADOR', version: 2, approvedBy: null });
+    // en el plan reabierto la fecha aprobada se conserva
+    const a = await prisma.scheduledActivity.findFirstOrThrow({ where: { planId: plan.id, status: 'PROGRAMADO' }, orderBy: { committedDate: 'asc' } });
+    const toDate = `${Y}-12-15`;
+    const rs = await c.coord.post(`/activities/${a.id}/reschedule`, { toDate, reason: 'Ajuste por plan reabierto' });
+    expect(rs.body.applied).toBe(true);
+    const after = await prisma.scheduledActivity.findUniqueOrThrow({ where: { id: a.id } });
+    expect(after.originalDate.toISOString()).toBe(a.originalDate.toISOString());
+    expect(after.committedDate.toISOString().slice(0, 10)).toBe(toDate);
+    expect(after.status).toBe('REPROGRAMADO');
+    expect((await c.coord.post(`/plans/${Y}/submit`)).status).toBe(201);
+    expect((await c.coord.post(`/plans/${Y}/approve`, { reason: 'Aprobación de la versión 2' })).status).toBe(201);
+    const versions = await prisma.annualPlanVersion.findMany({ where: { planId: plan.id }, orderBy: { version: 'asc' } });
+    expect(versions.map((v) => v.version)).toEqual([1, 2]);
+  });
+
+  it('la orden de trabajo adopta la nueva fecha cuando se reprograma su actividad', async () => {
+    const Y = YEAR + 1;
+    const a = await prisma.scheduledActivity.findFirstOrThrow({ where: { plan: { year: Y }, status: 'PROGRAMADO', workOrder: null }, orderBy: { committedDate: 'asc' } });
+    const wo = await c.coord.post(`/workorders/from-activity/${a.id}`, {});
+    expect(wo.status).toBe(201);
+    const toDate = `${Y}-10-09`;
+    const r = await c.coord.post(`/activities/${a.id}/reschedule`, { toDate, reason: 'Se coordina con el área usuaria', autoApprove: true });
+    expect(r.body.applied).toBe(true);
+    const w = await prisma.workOrder.findUniqueOrThrow({ where: { id: wo.body.id } });
+    expect(w.scheduledDate?.toISOString().slice(0, 10)).toBe(toDate);
+    expect(w.dueDate?.toISOString().slice(0, 10)).toBe(toDate);
+  });
+
+  it('no asigna órdenes a usuarios inactivos o sin permiso de ejecución', async () => {
+    const a = await prisma.asset.findFirstOrThrow({ where: { status: 'OPERATIVO' } });
+    const base = { type: 'PREVENTIVA', assetId: a.id, title: 'Revisión puntual', priority: 'MEDIA' };
+    expect((await c.coord.post('/workorders', { ...base, assignedToId: ctx.users.req.id })).status).toBe(400);
+    expect((await c.coord.post('/workorders', { ...base, assignedToId: ctx.users.tech.id })).status).toBe(201);
+  });
+
+  it('al desactivar un usuario se liberan sus actividades pendientes y programas', async () => {
+    const roles = (await c.admin.get('/roles')).body as { id: string; code: string }[];
+    const u = await c.admin.post('/users', { username: 't.temporal', fullName: 'Técnico temporal', roleId: roles.find((r) => r.code === 'TECNICO')!.id, password: 'Temporal#2026xyz', areaIds: [] });
+    expect(u.status).toBe(201);
+    const a = await prisma.scheduledActivity.findFirstOrThrow({ where: { plan: { year: YEAR + 1 }, status: 'PROGRAMADO' } });
+    expect((await c.coord.post(`/activities/${a.id}/assign`, { responsibleId: u.body.id })).status).toBe(201);
+    const off = await c.admin.patch(`/users/${u.body.id}`, { isActive: false });
+    expect(off.status).toBe(200);
+    expect(off.body.released.activities).toBeGreaterThanOrEqual(1);
+    expect((await prisma.scheduledActivity.findUniqueOrThrow({ where: { id: a.id } })).responsibleId).toBeNull();
+    expect((await c.coord.post(`/activities/${a.id}/assign`, { responsibleId: u.body.id })).status).toBe(400);
+  });
+
+  it('editar un usuario sin cambiar su rol no cierra sus sesiones y el administrador puede editar su propio perfil', async () => {
+    const me = await prisma.user.findUniqueOrThrow({ where: { id: ctx.users.admin.id } });
+    expect((await c.admin.patch(`/users/${me.id}`, { fullName: 'Administrador del sistema', roleId: me.roleId })).status).toBe(200);
+    const tech = await prisma.user.findUniqueOrThrow({ where: { id: ctx.users.tech.id } });
+    expect((await c.admin.patch(`/users/${tech.id}`, { position: 'Técnico de soporte', roleId: tech.roleId })).status).toBe(200);
+    expect((await c.tech.get('/auth/me')).status).toBe(200); // la sesión sigue vigente
+    const other = (await c.admin.get('/roles')).body.find((r: { id: string }) => r.id !== me.roleId);
+    expect((await c.admin.patch(`/users/${me.id}`, { roleId: other.id })).status).toBe(403);
+  });
+
+  it('al cambiar la categoría de un activo se limpia la subcategoría que ya no corresponde', async () => {
+    const cats = (await c.coord.get('/categories')).body as { id: string; subcategories: { id: string }[] }[];
+    const withSub = cats.find((x) => x.subcategories.length)!;
+    const other = cats.find((x) => x.id !== withSub.id)!;
+    const a = await c.coord.post('/assets', { name: 'Equipo para reclasificar', categoryId: withSub.id, subcategoryId: withSub.subcategories[0].id, areaId: ctx.areas.uci.id });
+    expect(a.status).toBe(201);
+    const r = await c.coord.patch(`/assets/${a.body.id}`, { categoryId: other.id });
+    expect(r.status).toBe(200);
+    const after = await prisma.asset.findUniqueOrThrow({ where: { id: a.body.id } });
+    expect(after.categoryId).toBe(other.id);
+    expect(after.subcategoryId).toBeNull();
+    // una subcategoría de otra categoría se rechaza aunque no se envíe la categoría
+    expect((await c.coord.patch(`/assets/${a.body.id}`, { subcategoryId: withSub.subcategories[0].id })).status).toBe(400);
+  });
+
   it('explica por qué no hay programas elegibles al generar un plan vacío', async () => {
     const year = 2099;
     const programs = await prisma.maintenanceProgram.findMany({ select: { id: true, isActive: true } });
@@ -822,7 +960,7 @@ describe('18. Comportamiento ante errores de base de datos', () => {
 describe('20. Auditoría de operaciones críticas', () => {
   it('registra usuario, operación, valores anteriores/nuevos, justificación e IP', async () => {
     const r = await c.auditor.get('/audit?action=APROBAR_REPROGRAMACION');
-    expect(r.body.total).toBe(1);
+    expect(r.body.total).toBeGreaterThanOrEqual(1);
     const e = r.body.items[0];
     expect(e).toMatchObject({ username: 't.coord', module: 'cronograma' });
     expect(e.before.committedDate).toBeTruthy();

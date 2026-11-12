@@ -170,6 +170,22 @@ export class WorkOrdersService {
     return w;
   }
 
+  /** El responsable de una orden debe ser un usuario activo cuyo rol permita ejecutar órdenes */
+  async assertAssignable(tx: Tx, userId: string) {
+    const u = await tx.user.findUnique({ where: { id: userId }, select: { isActive: true, role: { select: { permissions: { where: { permissionCode: 'workorders.execute' }, select: { permissionCode: true } } } } } });
+    if (!u?.isActive) throw new BadRequestException('El responsable asignado no existe o está inactivo');
+    if (!u.role.permissions.length) throw new BadRequestException('El rol del responsable no permite ejecutar órdenes de trabajo');
+  }
+
+  private async isAssignable(tx: Tx, userId: string) {
+    try {
+      await this.assertAssignable(tx, userId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   // ------------------------------------------------------------- Creación
   async createFromActivity(ctx: ReqCtx, activityId: string, assignedToId?: string | null) {
     return this.prisma.$transaction(async (tx) => {
@@ -181,8 +197,10 @@ export class WorkOrdersService {
       if (!['PROGRAMADO', 'REPROGRAMADO'].includes(a.status)) throw new ConflictException(`La actividad está en estado ${a.status}`);
       if (a.plan.status === 'CERRADO') throw new ConflictException('El plan anual está cerrado');
       if (INACTIVE_STATUSES.includes(a.asset.status)) throw new ConflictException('El activo está retirado o dado de baja');
-      const assignee = assignedToId ?? a.responsibleId;
+      // El responsable del cronograma se usa solo si sigue habilitado; si no, la orden queda abierta para asignar
+      const assignee = assignedToId ?? (a.responsibleId && (await this.isAssignable(tx, a.responsibleId)) ? a.responsibleId : null);
       if (assignee && !can(ctx.user, 'workorders.assign') && assignee !== ctx.user.id) throw new ForbiddenException('No puede asignar órdenes a otros usuarios');
+      if (assignedToId) await this.assertAssignable(tx, assignedToId);
       const code = await this.counters.nextCode(tx, 'OT', currentYearBogota());
       // El tipo de la orden sigue al cronograma: correctivo planificado → orden correctiva; el resto → preventiva
       const type: WorkOrderType = a.program.kind === 'CORRECTIVO' ? 'CORRECTIVA' : 'PREVENTIVA';
@@ -210,6 +228,7 @@ export class WorkOrdersService {
       assertAreaAccess(ctx.user, asset.areaId);
       if (INACTIVE_STATUSES.includes(asset.status)) throw new ConflictException('El activo está retirado o dado de baja');
       if (b.assignedToId && !can(ctx.user, 'workorders.assign') && b.assignedToId !== ctx.user.id) throw new ForbiddenException('No puede asignar órdenes a otros usuarios');
+      if (b.assignedToId) await this.assertAssignable(tx, b.assignedToId);
       if (b.type === 'CORRECTIVA' && !b.failureReportId && !b.parentWorkOrderId) {
         throw new BadRequestException('Una orden correctiva debe vincularse a un reporte de falla o a la orden donde se detectó');
       }
@@ -245,8 +264,7 @@ export class WorkOrdersService {
       const w = await this.loadForUpdate(tx, id);
       assertAreaAccess(ctx.user, w.areaId);
       if (['CERRADA', 'CANCELADA', 'PENDIENTE_VALIDACION'].includes(w.status)) throw new ConflictException(`No se puede reasignar una orden en estado ${w.status}`);
-      const u = await tx.user.findUnique({ where: { id: assignedToId } });
-      if (!u || !u.isActive) throw new BadRequestException('Usuario asignado inválido o inactivo');
+      await this.assertAssignable(tx, assignedToId);
       const to: WorkOrderStatus = w.status === 'ABIERTA' ? 'ASIGNADA' : w.status;
       const updated = await tx.workOrder.update({ where: { id }, data: { assignedToId, status: to, supplierId: supplierId === undefined ? undefined : supplierId } });
       await this.event(tx, id, ctx.user.id, w.assignedToId ? 'REASIGNAR' : 'ASIGNAR', w.status, to, note, { from: w.assignedToId, to: assignedToId });

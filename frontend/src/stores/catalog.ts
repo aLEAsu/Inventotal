@@ -18,12 +18,15 @@ export interface UserOpt {
   fullName: string;
   roleCode: string;
   isTechnicalStaff: boolean;
+  canExecute?: boolean;
 }
 export interface AssetOpt {
   id: string;
   code: string;
   name: string;
   areaId: string;
+  categoryId: string;
+  subcategoryId: string | null;
   criticality: string;
   status: string;
   location: { name: string } | null;
@@ -47,6 +50,8 @@ export const useCatalog = defineStore('catalog', {
     institution: (s) => String(s.settings['institution.name'] ?? 'Institución'),
     shortName: (s) => String(s.settings['institution.shortName'] ?? 'SIGM'),
     activeAreas: (s) => s.areas.filter((a) => a.isActive),
+    /** Usuarios que pueden ejecutar órdenes (responsables de órdenes y del cronograma) */
+    executors: (s) => s.users.filter((u) => u.canExecute !== false),
     activeCategories: (s) => s.categories.filter((c) => c.isActive),
     technicians: (s) => s.users,
   },

@@ -35,8 +35,8 @@ async function submit() {
 <template>
   <div class="wrap">
     <form class="box" @submit.prevent="submit">
+      <div class="brand-logos"><img src="/brand/posmedica.png" alt="POSMEDICA S.A.S" /><img src="/brand/unop.png" alt="UNO-P Unidad Oncológica del Putumayo" /></div>
       <div class="head">
-        <div class="logo">SIGM</div>
         <div>
           <h1>Gestión de mantenimiento</h1>
           <div class="muted">Equipos de cómputo y sistemas</div>
@@ -61,7 +61,8 @@ async function submit() {
 .wrap { min-height: 100vh; display: grid; place-items: center; padding: 16px; background: linear-gradient(160deg, #0f2a3d 0%, #13405c 55%, #e8eef3 55%); }
 .box { width: 400px; max-width: 100%; background: #fff; border-radius: 14px; padding: 28px; box-shadow: 0 20px 50px rgba(15, 42, 61, 0.25); }
 .head { display: flex; gap: 12px; align-items: center; margin-bottom: 22px; }
-.logo { width: 48px; height: 48px; border-radius: 10px; background: var(--p-primary-500); color: #fff; display: grid; place-items: center; font-weight: 700; font-size: 0.82rem; }
+.brand-logos { display: flex; align-items: center; justify-content: center; gap: 18px; margin-bottom: 18px; padding-bottom: 16px; border-bottom: 1px solid var(--app-border); }
+.brand-logos img { height: 44px; width: auto; max-width: 46%; object-fit: contain; }
 .w-full { width: 100%; }
 .foot { font-size: 0.76rem; margin: 16px 0 0; text-align: center; }
 </style>

@@ -98,7 +98,7 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
         <div class="field full"><label>Activo <span class="req">*</span></label><Select v-model="form.assetId" :options="cat.assets" :option-label="assetLabel" option-value="id" filter /></div>
         <div class="field full"><label>Título <span class="req">*</span></label><InputText v-model="form.title" /></div>
         <div class="field full"><label>Descripción</label><Textarea v-model="form.description" rows="3" /></div>
-        <div class="field"><label>Responsable</label><Select v-model="form.assignedToId" :options="cat.users" option-label="fullName" option-value="id" filter show-clear /></div>
+        <div class="field"><label>Responsable</label><Select v-model="form.assignedToId" :options="cat.executors" option-label="fullName" option-value="id" filter show-clear /></div>
         <div class="field"><label>Proveedor</label><Select v-model="form.supplierId" :options="cat.suppliers" option-label="name" option-value="id" filter show-clear /></div>
         <div class="field"><label>Fecha programada</label><DatePicker v-model="form.scheduledDate" date-format="dd/mm/yy" show-icon /></div>
         <div class="field"><label>Tipo de intervención</label><InputText v-model="form.interventionType" /></div>

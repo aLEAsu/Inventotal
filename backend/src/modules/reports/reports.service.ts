@@ -3,6 +3,7 @@ import ExcelJS from 'exceljs';
 import type { ReqCtx } from '../../common/auth.types';
 import { fmtDateTimeBogota, fmtDMY, MONTHS_ES } from '../../common/dates';
 import { fmtCOP, toNum } from '../../common/money';
+import { addExcelLogos } from '../../common/excel-brand';
 import { InstitutionalPdf, PdfOptions } from '../../common/pdf';
 import { PrismaService } from '../../common/prisma.service';
 import { areaFilter } from '../../common/scope';
@@ -88,6 +89,8 @@ export class ReportsService {
     const ws = wb.addWorksheet('Inventario F-01');
     const institution = await this.settings.get<string>('institution.name');
     ws.addRow([institution]).font = { bold: true, size: 13 };
+    ws.mergeCells(1, 1, 1, 10);
+    addExcelLogos(wb, ws, 10);
     ws.addRow([`F-01 Inventario general de activos — ${fmtDateTimeBogota(new Date())}`]).font = { bold: true };
     ws.addRow([]);
     const h = ws.addRow(['Código', 'Nombre', 'Categoría', 'Subcategoría', 'Marca', 'Modelo', 'Serie', 'Ubicación', 'Área', 'Fabricante', 'Proveedor', 'Adquisición', 'Instalación', 'Garantía hasta', 'Costo (COP)', 'Criticidad', 'Estado', 'Responsable', 'Hostname', 'IP', 'MAC', 'Sistema operativo', 'Versión software', 'Procesador', 'RAM (GB)', 'Almacenamiento (GB)', 'Usuario final', 'Licencia vence']);

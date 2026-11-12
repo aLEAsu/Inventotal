@@ -134,12 +134,14 @@ async function generate() {
     await reload();
   }
 }
-async function transition(action: 'submit' | 'review' | 'return' | 'approve' | 'close') {
-  const titles = { submit: 'Enviar a revisión', review: 'Registrar revisión', return: 'Devolver a borrador', approve: 'Aprobar plan', close: 'Cerrar y archivar plan' };
-  const needs = action === 'return' || action === 'close';
+async function transition(action: 'submit' | 'review' | 'return' | 'approve' | 'close' | 'reopen') {
+  const titles = { submit: 'Enviar a revisión', review: 'Registrar revisión', return: 'Devolver a borrador', approve: 'Aprobar plan', close: 'Cerrar y archivar plan', reopen: 'Reabrir plan para modificarlo' };
+  const needs = action === 'return' || action === 'close' || action === 'reopen';
   const why = await reason.value!.ask({
     title: titles[action], min: needs ? 10 : 0, label: needs ? 'Justificación' : 'Observación (opcional)', confirmLabel: titles[action],
-    message: action === 'approve' ? 'Se creará una versión inmutable del plan. Las fechas aprobadas quedarán protegidas: los cambios posteriores requieren reprogramación aprobada.' : action === 'close' ? 'El plan cerrado no admitirá más cambios.' : undefined,
+    message: action === 'approve' ? 'Se creará una versión inmutable del plan. Las fechas aprobadas quedarán protegidas: los cambios posteriores requieren reprogramación aprobada.'
+      : action === 'close' ? 'El plan cerrado no admitirá más cambios.'
+        : action === 'reopen' ? 'El plan vuelve a borrador con una versión nueva para que pueda editarlo libremente. La versión aprobada actual queda guardada en el historial y las fechas aprobadas se conservan. Al terminar, envíelo a revisión y apruébelo de nuevo.' : undefined,
   });
   if (why === null) return;
   if (await n.run(() => http.post(`/plans/${year.value}/${action}`, { reason: why || null }), 'Estado del plan actualizado')) await reload();
@@ -175,6 +177,7 @@ function openMatrixCell(cell: Record<string, any>, row: Record<string, any>) {
     return;
   }
   groupedCell.value = { ...cell, programName: row.programName, targetName: row.targetName, groupType: row.groupType };
+  resetBulk();
   groupedCellVisible.value = true;
 }
 function openGroupedActivity(id: string) {
@@ -261,6 +264,87 @@ async function decide(id: string, approve: boolean) {
 const inspection = () => n.run(() => download(`/reports/inspection/${act.value!.id}.pdf`), 'Formato F-08 generado');
 
 const canEditPlan = computed(() => plan.value && ['BORRADOR', 'APROBADO'].includes(plan.value.status));
+
+// --------------------------------------------- Editar datos del plan
+const planEdit = ref<{ visible: boolean; title: string; notes: string }>({ visible: false, title: '', notes: '' });
+function openPlanEdit() {
+  planEdit.value = { visible: true, title: plan.value?.title ?? '', notes: plan.value?.notes ?? '' };
+}
+async function savePlanEdit() {
+  const body = { title: planEdit.value.title, notes: planEdit.value.notes || null };
+  if (await n.run(() => http.patch(`/plans/${year.value}`, body), 'Datos del plan actualizados')) {
+    planEdit.value.visible = false;
+    await reload();
+  }
+}
+
+// --------------------------------------------- Agregar actividad puntual
+type ProgramOpt = { id: string; code: string; name: string; kind: string; targetType: string; targetName: string | null; assetId: string | null; categoryIds?: string[]; categoryId: string | null; subcategoryId: string | null; responsibleId: string | null };
+const programOpts = ref<ProgramOpt[]>([]);
+const addAct = ref({ visible: false, programId: null as string | null, assetId: null as string | null, date: null as Date | null, reason: '' });
+async function openAddActivity() {
+  const r = await n.run(() => http.get('/programs', { params: { scheduleType: scheduleType.value, active: 'true', pageSize: 500 } }));
+  if (!r) return;
+  programOpts.value = r.data.items.filter((x: { isActive: boolean }) => x.isActive !== false);
+  addAct.value = { visible: true, programId: null, assetId: null, date: ymdToDate(`${year.value}-${String(Math.max(1, currentMonth.value + 1)).padStart(2, '0')}-01`), reason: '' };
+}
+const selectedProgram = computed(() => programOpts.value.find((x) => x.id === addAct.value.programId) ?? null);
+/** Equipos del alcance del programa (los grupos personalizados se validan en el servidor) */
+const programAssets = computed(() => {
+  const p = selectedProgram.value;
+  if (!p) return [];
+  return cat.assets.filter((a) => {
+    if (p.targetType === 'ACTIVO') return a.id === p.assetId;
+    if (p.targetType === 'CATEGORIA') return (p.categoryIds ?? [p.categoryId]).includes(a.categoryId);
+    if (p.targetType === 'SUBCATEGORIA') return a.subcategoryId === p.subcategoryId;
+    return true;
+  });
+});
+watch(() => addAct.value.programId, () => {
+  addAct.value.assetId = programAssets.value.length === 1 ? programAssets.value[0].id : null;
+});
+const programLabel = (x: ProgramOpt) => `${x.code} · ${x.name}${x.targetName ? ` (${x.targetName})` : ''}`;
+async function saveAddActivity() {
+  const a = addAct.value;
+  const body = { programId: a.programId, assetId: a.assetId, date: dateToYmd(a.date), reason: a.reason };
+  if (await n.run(() => http.post(`/plans/${year.value}/activities`, body), 'Actividad agregada al cronograma')) {
+    addAct.value.visible = false;
+    await reload();
+  }
+}
+
+// --------------------------------------------- Edición en lote (equipos de un grupo en una fecha)
+const groupSel = ref<Record<string, any>[]>([]);
+const bulkForm = ref({ mode: null as null | 'RESCHEDULE' | 'ASSIGN', toDate: null as Date | null, responsibleId: null as string | null, reason: '', autoApprove: false });
+const editableInGroup = computed(() => (groupedCell.value?.activities ?? []).filter((x: { status: string }) => !['EJECUTADO', 'EN_EJECUCION'].includes(x.status)));
+const planEditable = computed(() => !!plan.value && ['BORRADOR', 'APROBADO'].includes(plan.value.status));
+function resetBulk() {
+  groupSel.value = [...editableInGroup.value];
+  bulkForm.value = { mode: null, toDate: groupedCell.value ? ymdToDate(groupedCell.value.date) : null, responsibleId: null, reason: '', autoApprove: auth.can('plans.approve') };
+}
+async function runBulk(action: 'RESCHEDULE' | 'ASSIGN' | 'CANCELADO' | 'NO_APLICA' | 'PROGRAMADO') {
+  if (!groupSel.value.length) return;
+  let reasonText = bulkForm.value.reason;
+  if (['CANCELADO', 'NO_APLICA', 'PROGRAMADO'].includes(action)) {
+    const label = { CANCELADO: 'Cancelar actividades seleccionadas', NO_APLICA: 'Marcar como no aplica', PROGRAMADO: 'Restituir actividades' }[action as 'CANCELADO'];
+    const why = await reason.value!.ask({ title: `${label} (${groupSel.value.length})`, danger: action !== 'PROGRAMADO', message: 'Los registros se conservan y quedan en la trazabilidad del plan.' });
+    if (!why) return;
+    reasonText = why;
+  }
+  const body = {
+    ids: groupSel.value.map((x) => x.id), action, reason: reasonText || null,
+    toDate: action === 'RESCHEDULE' ? dateToYmd(bulkForm.value.toDate) : undefined,
+    responsibleId: action === 'ASSIGN' ? bulkForm.value.responsibleId : undefined,
+    autoApprove: bulkForm.value.autoApprove,
+  };
+  const r = await n.run(() => http.post(`/plans/${year.value}/activities/bulk`, body));
+  if (r) {
+    const d = r.data;
+    n.ok(d.pendingApproval ? `${d.applied} aplicadas · ${d.pendingApproval} enviadas para aprobación` : `${d.applied} actividad(es) actualizadas`);
+    groupedCellVisible.value = false;
+    await reload();
+  }
+}
 const cellClass = (s: string) => `st-${s}`;
 const statusOpts = opts(ACTIVITY_STATUS);
 const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name}`;
@@ -277,7 +361,7 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
           <Tag v-if="plan" :value="`Versión ${plan.version}`" severity="secondary" />
         </div>
         <div class="sub">
-          <template v-if="plan">{{ plan.documentCode }} · creado {{ fmtDateTime(plan.createdAt) }} por {{ plan.createdBy }}<template v-if="plan.approvedAt"> · aprobado {{ fmtDateTime(plan.approvedAt) }} por {{ plan.approvedBy }}</template><template v-if="plan.lastGeneratedAt"> · última generación {{ fmtDateTime(plan.lastGeneratedAt) }}</template></template>
+          <template v-if="plan">{{ plan.documentCode }} · creado {{ fmtDateTime(plan.createdAt) }} por {{ plan.createdBy }}<template v-if="plan.approvedAt"> · aprobado {{ fmtDateTime(plan.approvedAt) }} por {{ plan.approvedBy }}</template><template v-if="plan.lastGeneratedAt"> · última generación {{ fmtDateTime(plan.lastGeneratedAt) }}</template><div v-if="plan.notes" class="plan-notes"><i class="pi pi-info-circle" /> {{ plan.notes }}</div></template>
           <template v-else>No existe plan para {{ year }}.</template>
         </div>
       </div>
@@ -313,6 +397,9 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
           <Button v-if="auth.can('plans.approve') && plan.status === 'EN_REVISION'" label="Registrar revisión" icon="pi pi-eye" severity="secondary" outlined @click="transition('review')" />
           <Button v-if="auth.can('plans.approve') && plan.status === 'EN_REVISION'" label="Aprobar" icon="pi pi-verified" severity="success" @click="transition('approve')" />
           <Button v-if="auth.can('plans.approve') && plan.status === 'EN_REVISION'" label="Devolver a borrador" icon="pi pi-undo" severity="warn" text @click="transition('return')" />
+          <Button v-if="auth.can('plans.generate') && canEditPlan" label="Agregar actividad" icon="pi pi-calendar-plus" severity="secondary" outlined data-testid="btn-add-activity" @click="openAddActivity" />
+          <Button v-if="auth.can('plans.generate') && plan.status !== 'CERRADO'" label="Editar datos del plan" icon="pi pi-pencil" severity="secondary" text data-testid="btn-edit-plan" @click="openPlanEdit" />
+          <Button v-if="auth.can('plans.approve') && plan.status === 'APROBADO'" label="Reabrir para modificar" icon="pi pi-lock-open" severity="warn" text data-testid="btn-reopen" @click="transition('reopen')" />
           <Button v-if="auth.can('plans.close') && plan.status === 'APROBADO'" label="Cerrar y archivar" icon="pi pi-lock" severity="contrast" text @click="transition('close')" />
           <span class="spacer" />
           <span v-if="plan.pendingReschedules" class="row"><i class="pi pi-clock" style="color: #b45309" /> {{ plan.pendingReschedules }} reprogramaciones pendientes</span>
@@ -553,14 +640,67 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
           <span class="spacer" />
           <Tag :value="`${groupedCell.executed} de ${groupedCell.count} ejecutados`" :severity="groupedCell.executed === groupedCell.count ? 'success' : 'secondary'" />
         </div>
-        <DataTable :value="groupedCell.activities ?? []" size="small">
+        <DataTable v-model:selection="groupSel" :value="groupedCell.activities ?? []" data-key="id" size="small" :row-selectable="(e: any) => !['EJECUTADO', 'EN_EJECUCION'].includes(e.data.status)" data-testid="group-table">
           <template #empty><div class="empty">No hay equipos asociados a esta fecha.</div></template>
+          <Column v-if="planEditable" selection-mode="multiple" header-style="width: 3rem" />
           <Column field="assetCode" header="Código" />
           <Column field="assetName" header="Equipo" />
           <Column header="Estado"><template #body="{ data }"><StatusTag :value="data.status" kind="activity" /></template></Column>
           <Column header="Reprogramada"><template #body="{ data }">{{ data.rescheduled ? 'Sí' : 'No' }}</template></Column>
           <Column style="width: 130px"><template #body="{ data }"><Button label="Ver detalle" size="small" text @click="openGroupedActivity(data.id)" /></template></Column>
         </DataTable>
+        <div v-if="planEditable" class="bulk mt" data-testid="group-bulk">
+          <div class="row">
+            <strong>Modificar {{ groupSel.length }} seleccionada(s)</strong>
+            <span class="spacer" />
+            <Button v-if="auth.can('schedule.reschedule')" label="Cambiar fecha" icon="pi pi-calendar" size="small" :outlined="bulkForm.mode !== 'RESCHEDULE'" :disabled="!groupSel.length" data-testid="bulk-reschedule" @click="bulkForm.mode = bulkForm.mode === 'RESCHEDULE' ? null : 'RESCHEDULE'" />
+            <Button v-if="auth.can('schedule.assign')" label="Asignar responsable" icon="pi pi-user" size="small" :outlined="bulkForm.mode !== 'ASSIGN'" :disabled="!groupSel.length" @click="bulkForm.mode = bulkForm.mode === 'ASSIGN' ? null : 'ASSIGN'" />
+            <template v-if="auth.canAny('plans.generate', 'plans.approve')">
+              <Button label="No aplica" size="small" text severity="secondary" :disabled="!groupSel.length" @click="runBulk('NO_APLICA')" />
+              <Button label="Cancelar" size="small" text severity="danger" :disabled="!groupSel.length" @click="runBulk('CANCELADO')" />
+              <Button label="Restituir" size="small" text :disabled="!groupSel.length" @click="runBulk('PROGRAMADO')" />
+            </template>
+          </div>
+          <div v-if="bulkForm.mode === 'RESCHEDULE'" class="form mt">
+            <Message v-if="plan?.status === 'APROBADO'" severity="info" :closable="false" class="full">El plan está aprobado: la fecha aprobada se conserva y el cambio requiere aprobación.</Message>
+            <div class="field"><label>Nueva fecha</label><DatePicker v-model="bulkForm.toDate" date-format="dd/mm/yy" show-icon :min-date="ymdToDate(`${year}-01-01`)!" :max-date="ymdToDate(`${year}-12-31`)!" data-testid="bulk-date" /></div>
+            <div v-if="plan?.status === 'APROBADO' && auth.can('plans.approve')" class="field"><label class="row"><Checkbox v-model="bulkForm.autoApprove" binary /> Aprobar en el mismo acto</label></div>
+            <div class="field full"><label>Justificación <span class="req">*</span></label><Textarea v-model="bulkForm.reason" rows="2" data-testid="bulk-reason" /></div>
+            <div><Button label="Aplicar nueva fecha" icon="pi pi-check" :disabled="!bulkForm.toDate || bulkForm.reason.trim().length < 10 || !groupSel.length" data-testid="bulk-apply" @click="runBulk('RESCHEDULE')" /></div>
+          </div>
+          <div v-if="bulkForm.mode === 'ASSIGN'" class="form mt">
+            <div class="field"><label>Responsable</label><Select v-model="bulkForm.responsibleId" :options="cat.executors" option-label="fullName" option-value="id" show-clear filter placeholder="Sin responsable" /></div>
+            <div><Button label="Asignar" icon="pi pi-check" :disabled="!groupSel.length" @click="runBulk('ASSIGN')" /></div>
+          </div>
+        </div>
+      </template>
+    </Dialog>
+
+    <!-- Editar datos del plan -->
+    <Dialog v-model:visible="planEdit.visible" modal header="Editar datos del plan" :style="{ width: '560px', maxWidth: '95vw' }">
+      <div class="form">
+        <div class="field full"><label>Título del documento <span class="req">*</span></label><InputText v-model="planEdit.title" maxlength="200" data-testid="plan-title" /></div>
+        <div class="field full"><label>Observaciones</label><Textarea v-model="planEdit.notes" rows="4" maxlength="2000" placeholder="Alcance, supuestos, responsables del plan…" /></div>
+      </div>
+      <p class="muted small mt">Para cambiar fechas o equipos use el cronograma: clic en una celda para modificar un grupo o un equipo, o «Agregar actividad».</p>
+      <template #footer>
+        <Button label="Cancelar" text @click="planEdit.visible = false" />
+        <Button label="Guardar" icon="pi pi-check" :disabled="planEdit.title.trim().length < 5" data-testid="plan-save" @click="savePlanEdit" />
+      </template>
+    </Dialog>
+
+    <!-- Agregar actividad puntual -->
+    <Dialog v-model:visible="addAct.visible" modal header="Agregar actividad al cronograma" :style="{ width: '620px', maxWidth: '95vw' }">
+      <Message v-if="plan?.status === 'APROBADO'" severity="info" :closable="false" class="mb">El plan está aprobado: la actividad se agrega como cambio posterior a la aprobación y la versión del plan aumenta.</Message>
+      <div class="form">
+        <div class="field full"><label>Programa del plan maestro <span class="req">*</span></label><Select v-model="addAct.programId" :options="programOpts" :option-label="programLabel" option-value="id" filter :placeholder="`Programas ${typeLabel}s`" data-testid="add-program" /></div>
+        <div class="field full"><label>Equipo <span class="req">*</span></label><Select v-model="addAct.assetId" :options="programAssets" :option-label="assetLabel" option-value="id" filter :disabled="!addAct.programId" placeholder="Equipo del grupo del programa" data-testid="add-asset" /></div>
+        <div class="field"><label>Fecha <span class="req">*</span></label><DatePicker v-model="addAct.date" date-format="dd/mm/yy" show-icon :min-date="ymdToDate(`${year}-01-01`)!" :max-date="ymdToDate(`${year}-12-31`)!" data-testid="add-date" /></div>
+        <div class="field full"><label>Justificación <span class="req">*</span></label><Textarea v-model="addAct.reason" rows="2" placeholder="Ej.: mantenimiento adicional solicitado por el área" data-testid="add-reason" /></div>
+      </div>
+      <template #footer>
+        <Button label="Cancelar" text @click="addAct.visible = false" />
+        <Button label="Agregar" icon="pi pi-plus" :disabled="!addAct.programId || !addAct.assetId || !addAct.date || addAct.reason.trim().length < 10" data-testid="add-save" @click="saveAddActivity" />
       </template>
     </Dialog>
 
@@ -579,7 +719,7 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
         </dl>
         <div class="field mt" style="max-width: 360px">
           <label>Responsable</label>
-          <Select :model-value="act.responsibleId" :options="cat.users" option-label="fullName" option-value="id" show-clear filter :disabled="!auth.can('schedule.assign') || ['EJECUTADO', 'CANCELADO', 'NO_APLICA'].includes(act.status)" @update:model-value="assign" />
+          <Select :model-value="act.responsibleId" :options="cat.executors" option-label="fullName" option-value="id" show-clear filter :disabled="!auth.can('schedule.assign') || ['EJECUTADO', 'CANCELADO', 'NO_APLICA'].includes(act.status)" @update:model-value="assign" />
         </div>
         <template v-if="auth.can('schedule.reschedule') && ['PROGRAMADO', 'REPROGRAMADO'].includes(act.status) && ['BORRADOR', 'APROBADO'].includes(act.plan.status)">
           <h3 class="mt mb">Reprogramar</h3>
@@ -610,6 +750,9 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
 
 <style scoped>
 .hint-banner :deep(.p-message-text) { width: 100%; }
+.plan-notes { margin-top: 4px; color: #334155; white-space: pre-line; }
+.bulk { border: 1px solid var(--app-border); border-radius: 8px; padding: 10px 12px; background: #f8fafc; }
+.bulk .row { flex-wrap: wrap; gap: 6px; }
 .type-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .type-bar :deep(.p-togglebutton-content) { gap: 6px; }
 .small { font-size: 0.8rem; }

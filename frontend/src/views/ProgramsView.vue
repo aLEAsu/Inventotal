@@ -322,7 +322,7 @@ const weekdayOptions = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'S
 
       <h3 class="mt mb">Responsables y referencias</h3>
       <div class="form">
-        <div class="field"><label>Responsable</label><Select v-model="form.responsibleId" :options="cat.users" option-label="fullName" option-value="id" filter show-clear /></div>
+        <div class="field"><label>Responsable</label><Select v-model="form.responsibleId" :options="cat.executors" option-label="fullName" option-value="id" filter show-clear /></div>
         <div class="field"><label>Proveedor (si aplica)</label><Select v-model="form.supplierId" :options="cat.suppliers" option-label="name" option-value="id" filter show-clear /></div>
         <div class="field"><label>Requisitos técnicos</label><Textarea v-model="form.technicalRequirements" rows="2" /></div>
         <div class="field"><label>Documentación de referencia</label><Textarea v-model="form.references" rows="2" /></div>

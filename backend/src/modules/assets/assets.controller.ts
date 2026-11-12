@@ -97,7 +97,7 @@ export class AssetsController {
     const where = ctx.user.scope === 'AREA' ? { areaId: { in: ctx.user.areaIds } } : {};
     return this.prisma.asset.findMany({
       where: { ...where, status: { notIn: ['DADO_DE_BAJA', 'RETIRADO'] } },
-      select: { id: true, code: true, name: true, areaId: true, categoryId: true, criticality: true, status: true, location: { select: { name: true } } },
+      select: { id: true, code: true, name: true, areaId: true, categoryId: true, subcategoryId: true, criticality: true, status: true, location: { select: { name: true } } },
       orderBy: { code: 'asc' },
     });
   }

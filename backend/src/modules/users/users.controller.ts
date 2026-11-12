@@ -61,10 +61,11 @@ export class UsersController {
   async options() {
     const users = await this.prisma.user.findMany({
       where: { isActive: true },
-      select: { id: true, fullName: true, isTechnicalStaff: true, role: { select: { code: true } } },
+      select: { id: true, fullName: true, isTechnicalStaff: true, role: { select: { code: true, permissions: { where: { permissionCode: 'workorders.execute' }, select: { permissionCode: true } } } } },
       orderBy: { fullName: 'asc' },
     });
-    return users.map((u) => ({ id: u.id, fullName: u.fullName, roleCode: u.role.code, isTechnicalStaff: u.isTechnicalStaff }));
+    // canExecute: puede recibir órdenes de trabajo y responsabilidades del cronograma
+    return users.map((u) => ({ id: u.id, fullName: u.fullName, roleCode: u.role.code, isTechnicalStaff: u.isTechnicalStaff, canExecute: u.role.permissions.length > 0 }));
   }
 
   @Post('users')
@@ -92,10 +93,14 @@ export class UsersController {
   @Perms('users.manage')
   @ApiZBody(UserUpdate)
   async update(@Ctx() ctx: ReqCtx, @Param('id', ParseUUIDPipe) id: string, @ZBody(UserUpdate) b: z.infer<typeof UserUpdate>) {
-    if (id === ctx.user.id && (b.isActive === false || b.roleId)) {
-      throw new ForbiddenException('No puede desactivar ni cambiar el rol de su propio usuario');
-    }
     return this.prisma.$transaction(async (tx) => {
+      const current = await tx.user.findUniqueOrThrow({ where: { id }, select: { roleId: true, isActive: true } });
+      // El formulario envía siempre el rol: solo cuenta como cambio si es distinto al actual
+      const roleChanged = !!b.roleId && b.roleId !== current.roleId;
+      const deactivating = b.isActive === false && current.isActive;
+      if (id === ctx.user.id && (b.isActive === false || roleChanged)) {
+        throw new ForbiddenException('No puede desactivar ni cambiar el rol de su propio usuario');
+      }
       const before = flatUser(await tx.user.findUniqueOrThrow({ where: { id }, select: userSelect }));
       const { areaIds, ...data } = b;
       await tx.user.update({ where: { id }, data: { ...data, email: data.email === undefined ? undefined : data.email } });
@@ -103,12 +108,20 @@ export class UsersController {
         await tx.userArea.deleteMany({ where: { userId: id } });
         await tx.userArea.createMany({ data: areaIds.map((areaId) => ({ userId: id, areaId })) });
       }
-      if (b.isActive === false || b.roleId) {
+      if (deactivating || roleChanged) {
         await tx.session.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } });
       }
+      let released: { activities: number; programs: number; openWorkOrders: number } | null = null;
+      if (deactivating) {
+        // Las actividades pendientes y los programas dejan de apuntar a un usuario inactivo; las órdenes abiertas se informan para reasignarlas
+        const acts = await tx.scheduledActivity.updateMany({ where: { responsibleId: id, status: { in: ['PROGRAMADO', 'REPROGRAMADO'] } }, data: { responsibleId: null } });
+        const progs = await tx.maintenanceProgram.updateMany({ where: { responsibleId: id }, data: { responsibleId: null } });
+        const openWorkOrders = await tx.workOrder.count({ where: { assignedToId: id, status: { notIn: ['CERRADA', 'CANCELADA'] } } });
+        released = { activities: acts.count, programs: progs.count, openWorkOrders };
+      }
       const after = flatUser(await tx.user.findUniqueOrThrow({ where: { id }, select: userSelect }));
-      await this.audit.log(ctx, { action: 'EDITAR', module: 'usuarios', entity: 'User', entityId: id, ...diff(before, after) }, tx);
-      return after;
+      await this.audit.log(ctx, { action: 'EDITAR', module: 'usuarios', entity: 'User', entityId: id, ...diff(before, after), ...(released ? { reason: `Desactivación: ${released.activities} actividades y ${released.programs} programas sin responsable; ${released.openWorkOrders} órdenes abiertas por reasignar` } : {}) }, tx);
+      return released ? { ...after, released } : after;
     });
   }
 

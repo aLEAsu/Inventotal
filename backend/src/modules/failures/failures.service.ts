@@ -216,6 +216,7 @@ export class FailuresService {
         }, tx);
       } else {
         if (active.status === 'PENDIENTE_VALIDACION') throw new ConflictException('La orden activa está pendiente de validación; no puede reasignarse');
+        await this.workOrders.assertAssignable(tx, b.assignedToId);
         await tx.workOrder.update({
           where: { id: active.id },
           data: { assignedToId: b.assignedToId, status: active.status === 'ABIERTA' ? 'ASIGNADA' : active.status, supplierId: b.supplierId === undefined ? undefined : b.supplierId },

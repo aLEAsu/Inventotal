@@ -134,7 +134,7 @@ const scale = [1, 2, 3, 4, 5];
       </Dialog>
       <Dialog v-model:visible="asg.visible" modal header="Asignar responsable" :style="{ width: '480px', maxWidth: '95vw' }">
         <div class="grid">
-          <div class="field"><label>Responsable técnico <span class="req">*</span></label><Select v-model="asg.assignedToId" :options="cat.users" option-label="fullName" option-value="id" filter /></div>
+          <div class="field"><label>Responsable técnico <span class="req">*</span></label><Select v-model="asg.assignedToId" :options="cat.executors" option-label="fullName" option-value="id" filter /></div>
           <div class="field"><label>Proveedor</label><Select v-model="asg.supplierId" :options="cat.suppliers" option-label="name" option-value="id" filter show-clear /></div>
           <div class="field"><label>Fecha límite</label><DatePicker v-model="asg.dueDate" date-format="dd/mm/yy" show-icon /></div>
           <div class="field"><label>Nota</label><Textarea v-model="asg.note" rows="2" /></div>

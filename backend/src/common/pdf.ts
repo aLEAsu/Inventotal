@@ -1,6 +1,11 @@
 import { jsPDF } from 'jspdf';
 import { autoTable, type UserOptions } from 'jspdf-autotable';
+import { LOGO_POSMEDICA, LOGO_UNOP } from './brand-logos';
 import { fmtDateTimeBogota } from './dates';
+
+type Logo = { data: string; width: number; height: number };
+/** Logos institucionales que encabezan todos los formatos (POSMEDICA S.A.S y UNO-P) */
+export const INSTITUTION_LOGOS: Logo[] = [LOGO_POSMEDICA, LOGO_UNOP];
 
 export interface DocHeader {
   institution: string;
@@ -12,6 +17,8 @@ export interface DocHeader {
   effectiveDate?: string;
   primaryColor?: string;
   generatedBy?: string;
+  /** Mostrar los logos institucionales en lugar del nombre (predeterminado: sí) */
+  logos?: boolean;
 }
 
 export interface PdfOptions {
@@ -72,11 +79,16 @@ export class InstitutionalPdf {
     const right = w * 0.25;
     d.line(m + left, m, m + left, m + h);
     d.line(m + w - right, m, m + w - right, m + h);
-    // Institución
-    d.setTextColor(...this.color);
-    d.setFont('helvetica', 'bold');
-    d.setFontSize(10.5);
-    d.text(d.splitTextToSize(this.header.institution, left - 6), m + left / 2, m + 10, { align: 'center' });
+    // Institución: logos (lado a lado o apilados, lo que los muestre más grandes) o, sin logos, el nombre
+    const nitH = this.header.institutionNit ? 4 : 0;
+    if (this.header.logos !== false && INSTITUTION_LOGOS.length) {
+      this.drawLogos(m + 2, m + 2, left - 4, h - 4 - nitH);
+    } else {
+      d.setTextColor(...this.color);
+      d.setFont('helvetica', 'bold');
+      d.setFontSize(10.5);
+      d.text(d.splitTextToSize(this.header.institution, left - 6), m + left / 2, m + 10, { align: 'center' });
+    }
     if (this.header.institutionNit) {
       d.setFont('helvetica', 'normal');
       d.setFontSize(7.5);
@@ -119,6 +131,37 @@ export class InstitutionalPdf {
     ].filter(Boolean);
     lines.forEach((t, i) => d.text(t, rx, m + 6 + i * 5.5));
     d.setTextColor(20);
+  }
+
+  /** Ubica los logos dentro del recuadro (x, y, w, h) conservando su proporción */
+  private drawLogos(x: number, y: number, w: number, h: number) {
+    const logos = INSTITUTION_LOGOS;
+    const gap = 2;
+    // Lado a lado: misma altura para todos
+    const ratioSum = logos.reduce((s, l) => s + l.width / l.height, 0);
+    const rowH = Math.min(h, (w - gap * (logos.length - 1)) / ratioSum);
+    // Apilados: cada uno ocupa una franja de la altura disponible
+    const stackSlot = (h - gap * (logos.length - 1)) / logos.length;
+    const stackH = logos.map((l) => Math.min(stackSlot, w / (l.width / l.height)));
+    const sideArea = logos.reduce((s, l) => s + rowH * rowH * (l.width / l.height), 0);
+    const stackArea = logos.reduce((s, l, i) => s + stackH[i] * stackH[i] * (l.width / l.height), 0);
+    if (sideArea >= stackArea) {
+      const total = rowH * ratioSum + gap * (logos.length - 1);
+      let cx = x + (w - total) / 2;
+      logos.forEach((l, i) => {
+        const lw = rowH * (l.width / l.height);
+        this.doc.addImage(l.data, 'JPEG', cx, y + (h - rowH) / 2, lw, rowH, `logo-${i}`, 'FAST');
+        cx += lw + gap;
+      });
+    } else {
+      const total = stackH.reduce((s, v) => s + v, 0) + gap * (logos.length - 1);
+      let cy = y + (h - total) / 2;
+      logos.forEach((l, i) => {
+        const lw = stackH[i] * (l.width / l.height);
+        this.doc.addImage(l.data, 'JPEG', x + (w - lw) / 2, cy, lw, stackH[i], `logo-${i}`, 'FAST');
+        cy += stackH[i] + gap;
+      });
+    }
   }
 
   addPage() {
