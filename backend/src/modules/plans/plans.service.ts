@@ -34,6 +34,8 @@ export interface ActivityFilters {
   responsibleId?: string;
   criticality?: 'CRITICA' | 'ALTA' | 'MEDIA' | 'BAJA';
   status?: DisplayStatus;
+  /** Ocultar las actividades quitadas del cronograma (canceladas / no aplica) */
+  excludeRemoved?: boolean;
   kind?: string;
   q?: string;
   /** Cronograma preventivo (todos los tipos excepto correctivo) o correctivo */
@@ -506,6 +508,7 @@ export class PlansService {
       }
       where.AND = and;
     }
+    if (f.excludeRemoved && !f.status) where.status = { notIn: ['CANCELADO', 'NO_APLICA'] };
     if (f.q) {
       where.OR = [
         { asset: { code: { contains: f.q, mode: 'insensitive' } } },
@@ -589,7 +592,7 @@ export class PlansService {
    * - view = 'equipos': una fila por equipo y programa (detalle completo).
    * Las actividades, órdenes y el seguimiento se conservan siempre por equipo.
    */
-  async matrix(ctx: ReqCtx, year: number, f: ActivityFilters, view: MatrixView = 'grupos') {
+  async matrix(ctx: ReqCtx, year: number, f: ActivityFilters, view: MatrixView = 'grupos', splitCategories = false) {
     const { plan, items, today } = await this.allActivities(ctx, year, { ...f, month: undefined });
     type Item = (typeof items)[number];
     type MatrixActivity = { id: string; assetId: string; assetCode: string; assetName: string; status: DisplayStatus; rescheduled: boolean; originalDate: string };
@@ -607,8 +610,12 @@ export class PlansService {
       const p = a.program;
       if (p.targetType === 'GRUPO') return { key: `p:${p.id}`, name: p.group?.name ?? p.name, type: 'Grupo personalizado' };
       if (p.targetType === 'SUBCATEGORIA') return { key: `p:${p.id}`, name: p.subcategory?.name ?? p.name, type: 'Subcategoría' };
-      // Un programa con varias categorías muestra una fila por cada categoría (mismo programa y periodicidad)
-      if (p.targetType === 'CATEGORIA') return { key: `p:${p.id}|c:${a.asset.category.id}`, name: a.asset.category.name, type: 'Categoría' };
+      if (p.targetType === 'CATEGORIA') {
+        // En impresión y exportes: una fila por categoría; en pantalla: el programa agrupado en una sola fila
+        if (splitCategories) return { key: `p:${p.id}|c:${a.asset.category.id}`, name: a.asset.category.name, type: 'Categoría' };
+        const names = [p.category?.name, ...p.extraCategories.map((x) => x.category.name)].filter(Boolean);
+        return { key: `p:${p.id}`, name: names.join(' + ') || p.name, type: names.length > 1 ? 'Categorías' : 'Categoría' };
+      }
       const snap = a.programSnapshot as Record<string, string | undefined>;
       const sub = a.asset.subcategory;
       return {
@@ -689,7 +696,7 @@ export class PlansService {
     const program = f.programId ? await this.prisma.maintenanceProgram.findUnique({ where: { id: f.programId }, select: { id: true, code: true, name: true, kind: true } }) : null;
     return {
       planId: plan.id, planStatus: plan.status, version: plan.version, year, today, view,
-      scheduleType: f.scheduleType ?? null, program,
+      scheduleType: f.scheduleType ?? null, program, splitCategories,
       assetCount: new Set(items.map((a) => a.asset.id)).size,
       total: result.reduce((s, r) => s + r.total, 0),
       executed: result.reduce((s, r) => s + r.executed, 0),
@@ -936,10 +943,29 @@ export class PlansService {
         if (found !== unique.length) throw new BadRequestException(`Hay actividades que no pertenecen al plan ${year}`);
         let applied = 0;
         let pendingApproval = 0;
+        let skipped = 0;
+        // Las que no admiten la acción (ejecutadas, con orden activa, ya en ese estado…) se omiten y se informan,
+        // para poder editar una fila o un grupo completo sin que una sola actividad bloquee el resto
+        const acts = await tx.scheduledActivity.findMany({
+          where: { id: { in: unique } },
+          select: { id: true, status: true, committedDate: true, workOrder: { select: { status: true } }, reschedules: { where: { status: 'PENDIENTE' }, select: { id: true } } },
+        });
+        const info = new Map(acts.map((a) => [a.id, a]));
+        const pendingStates = ['PROGRAMADO', 'REPROGRAMADO'];
+        const removedStates = ['CANCELADO', 'NO_APLICA'];
+        const activeWo = (a: (typeof acts)[number]) => !!a.workOrder && a.workOrder.status !== 'CANCELADA';
+        const admits = (a: (typeof acts)[number]) => {
+          if (action === 'RESCHEDULE') return pendingStates.includes(a.status) && !a.reschedules.length && fmtYmd(a.committedDate) !== opts.toDate;
+          if (action === 'ASSIGN') return !['EJECUTADO', ...removedStates].includes(a.status);
+          if (action === 'PROGRAMADO') return removedStates.includes(a.status);
+          return pendingStates.includes(a.status) && !activeWo(a); // quitar: cancelar / no aplica
+        };
         for (const id of unique) {
+          if (!admits(info.get(id)!)) {
+            skipped++;
+            continue;
+          }
           if (action === 'RESCHEDULE') {
-            const a = await tx.scheduledActivity.findUniqueOrThrow({ where: { id }, select: { committedDate: true } });
-            if (fmtYmd(a.committedDate) === opts.toDate) continue; // ya está en esa fecha
             const r = await this.rescheduleTx(tx, ctx, id, opts.toDate!, reason, !!opts.autoApprove, false);
             if (r.applied) applied++;
             else pendingApproval++;
@@ -955,7 +981,7 @@ export class PlansService {
         if (versionAction && applied > 0) {
           await this.bumpVersionIfApproved(tx, plan.id, ctx.user.id, versionAction, { count: applied, activityIds: unique, toDate: opts.toDate ?? null }, reason);
         }
-        return { total: unique.length, applied, pendingApproval };
+        return { total: unique.length, applied, pendingApproval, skipped };
       },
       { timeout: 60_000, maxWait: 10_000 },
     );

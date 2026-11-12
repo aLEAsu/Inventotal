@@ -3,7 +3,7 @@ import { INSTITUTION_LOGOS } from './pdf';
 
 /**
  * Encabezado de marca para hojas de Excel: deja la fila 1 alta y ubica los logos institucionales
- * (POSMEDICA a la izquierda, UNO-P a la derecha) sin tapar el texto centrado de la fila.
+ * (UNO-P, en la esquina izquierda) sin tapar el texto centrado de la fila.
  */
 export function addExcelLogos(wb: ExcelJS.Workbook, ws: ExcelJS.Worksheet, lastCol: number) {
   const height = 46; // px

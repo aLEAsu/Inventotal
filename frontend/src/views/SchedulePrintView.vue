@@ -77,7 +77,7 @@ async function fitToPage() {
 onMounted(async () => {
   try {
     const [p, m, st] = await Promise.all([
-      http.get(`/plans/${year}`), http.get(`/plans/${year}/matrix`, { params: { ...params, view } }), http.get('/settings/public'),
+      http.get(`/plans/${year}`), http.get(`/plans/${year}/matrix`, { params: { ...params, view, split: '1' } }), http.get('/settings/public'),
     ]);
     plan.value = p.data.plan;
     matrix.value = m.data;
@@ -130,7 +130,7 @@ const pageStyle = computed(() => `@page { size: ${paper.value} landscape; margin
       <!-- Encabezado institucional -->
       <table class="hdr">
         <tr>
-          <td class="inst"><div class="logos"><img src="/brand/posmedica.png" alt="POSMEDICA S.A.S" /><img src="/brand/unop.png" alt="UNO-P" /></div><div v-if="settings['institution.nit']" class="nit">NIT {{ settings['institution.nit'] }}</div></td>
+          <td class="inst"><div class="logos"><img src="/brand/unop.png" alt="UNO-P Unidad Oncológica del Putumayo" /></div><div v-if="settings['institution.nit']" class="nit">NIT {{ settings['institution.nit'] }}</div></td>
           <td class="ttl"><div class="t1">{{ title }}</div><div class="t2">Año {{ year }} · Estado: {{ PLAN_STATUS[plan.status].label }}</div><div v-if="filterText" class="t3">{{ filterText }}</div></td>
           <td class="ctl">
             <div>Código: <b>{{ plan.documentCode }}</b></div>
@@ -226,7 +226,7 @@ td, th { border: 0.6pt solid #8a8a8a; padding: 2pt 3pt; vertical-align: middle; 
 .hdr td { border-color: #666; height: 20mm; }
 .inst { width: 28%; text-align: center; }
 .logos { display: flex; align-items: center; justify-content: center; gap: 8px; }
-.logos img { height: 40px; width: auto; max-width: 48%; object-fit: contain; }
+.logos img { height: 50px; width: auto; max-width: 92%; object-fit: contain; }
 .iname { font-weight: 700; font-size: 11pt; color: #0f3d56; }
 .nit { font-size: 7.5pt; color: #444; margin-top: 2pt; }
 .ttl { text-align: center; }

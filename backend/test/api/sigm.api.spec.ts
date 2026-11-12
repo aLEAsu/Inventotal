@@ -361,7 +361,7 @@ describe('4-6. Programas preventivos y generación del cronograma', () => {
     expect(p.status).toBe(201);
   });
 
-  it('un programa puede abarcar varias categorías y el cronograma muestra una fila por categoría', async () => {
+  it('un programa puede abarcar varias categorías: agrupado en pantalla y una fila por categoría al imprimir', async () => {
     const cats = ((await c.coord.get('/categories')).body as { id: string; name: string; assetCount: number }[]).filter((x) => x.assetCount > 0);
     expect(cats.length).toBeGreaterThanOrEqual(2);
     const [a, b] = cats;
@@ -378,8 +378,15 @@ describe('4-6. Programas preventivos y generación del cronograma', () => {
 
     const g = await c.coord.post(`/plans/${YEAR}/generate`, { scheduleType: 'PREVENTIVO' });
     expect(g.status).toBe(201);
-    const m = await c.coord.get(`/plans/${YEAR}/matrix?scheduleType=PREVENTIVO`);
-    const rows = (m.body.rows as { programId: string; targetName: string; assetCount: number; groupType: string; programName: string }[]).filter((r) => r.programId === p.body.id);
+    type Row = { programId: string; targetName: string; assetCount: number; groupType: string; programName: string };
+    // Pantalla: el programa agrupado en una sola fila
+    const screen = await c.coord.get(`/plans/${YEAR}/matrix?scheduleType=PREVENTIVO`);
+    const grouped = (screen.body.rows as Row[]).filter((r) => r.programId === p.body.id);
+    expect(grouped).toHaveLength(1);
+    expect(grouped[0]).toMatchObject({ targetName: `${a.name} + ${b.name}`, groupType: 'Categorías', assetCount: a.assetCount + b.assetCount });
+    // Impresión: una fila por categoría
+    const m = await c.coord.get(`/plans/${YEAR}/matrix?scheduleType=PREVENTIVO&split=1`);
+    const rows = (m.body.rows as Row[]).filter((r) => r.programId === p.body.id);
     expect(rows).toHaveLength(2);
     expect(rows.find((r) => r.targetName === a.name)).toMatchObject({ groupType: 'Categoría', assetCount: a.assetCount, programName: 'Limpieza conjunta de cómputo y periféricos' });
     expect(rows.find((r) => r.targetName === b.name)).toMatchObject({ groupType: 'Categoría', assetCount: b.assetCount });
@@ -814,6 +821,15 @@ describe('14. Hoja de vida, 16. indicadores y 17. años anteriores', () => {
     expect(await prisma.scheduledActivity.count({ where: { id: { in: idsBulk }, status: 'NO_APLICA' } })).toBe(2);
     await c.coord.post(`/plans/${Y}/activities/bulk`, { ids: idsBulk, action: 'PROGRAMADO', reason: 'Los equipos regresaron a la sede' });
     expect(await prisma.scheduledActivity.count({ where: { id: { in: idsBulk }, status: 'PROGRAMADO' } })).toBe(2);
+    // quitar una fila: las que no admiten el cambio se omiten sin bloquear las demás
+    await c.coord.post(`/plans/${Y}/activities/bulk`, { ids: [idsBulk[0]], action: 'NO_APLICA', reason: 'Se quita una para la prueba' });
+    const rm = await c.coord.post(`/plans/${Y}/activities/bulk`, { ids: idsBulk, action: 'NO_APLICA', reason: 'Se quita toda la fila del cronograma' });
+    expect(rm.body).toMatchObject({ applied: 1, skipped: 1 });
+    // lo quitado no aparece si se ocultan las quitadas, y se puede volver a dejar
+    const hidden = await c.coord.get(`/plans/${Y}/activities?excludeRemoved=1&pageSize=1000`);
+    expect(hidden.body.items.some((x: { id: string }) => idsBulk.includes(x.id))).toBe(false);
+    const back = await c.coord.post(`/plans/${Y}/activities/bulk`, { ids: idsBulk, action: 'PROGRAMADO', reason: 'Se deja de nuevo la fila' });
+    expect(back.body.applied).toBe(2);
     // actividades de otro año: se rechaza todo el lote
     const foreign = await prisma.scheduledActivity.findFirstOrThrow({ where: { plan: { year: YEAR } } });
     expect((await c.coord.post(`/plans/${Y}/activities/bulk`, { ids: [idsBulk[0], foreign.id], action: 'ASSIGN', responsibleId: null })).status).toBe(400);

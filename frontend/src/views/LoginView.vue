@@ -35,7 +35,7 @@ async function submit() {
 <template>
   <div class="wrap">
     <form class="box" @submit.prevent="submit">
-      <div class="brand-logos"><img src="/brand/posmedica.png" alt="POSMEDICA S.A.S" /><img src="/brand/unop.png" alt="UNO-P Unidad Oncológica del Putumayo" /></div>
+      <div class="brand-logos"><img src="/brand/unop.png" alt="UNO-P Unidad Oncológica del Putumayo" /></div>
       <div class="head">
         <div>
           <h1>Gestión de mantenimiento</h1>
@@ -62,7 +62,7 @@ async function submit() {
 .box { width: 400px; max-width: 100%; background: #fff; border-radius: 14px; padding: 28px; box-shadow: 0 20px 50px rgba(15, 42, 61, 0.25); }
 .head { display: flex; gap: 12px; align-items: center; margin-bottom: 22px; }
 .brand-logos { display: flex; align-items: center; justify-content: center; gap: 18px; margin-bottom: 18px; padding-bottom: 16px; border-bottom: 1px solid var(--app-border); }
-.brand-logos img { height: 44px; width: auto; max-width: 46%; object-fit: contain; }
+.brand-logos img { height: 64px; width: auto; max-width: 80%; object-fit: contain; }
 .w-full { width: 100%; }
 .foot { font-size: 0.76rem; margin: 16px 0 0; text-align: center; }
 </style>

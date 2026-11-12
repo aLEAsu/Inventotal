@@ -37,7 +37,8 @@ export class PlanExportService {
 
   private async context(ctx: ReqCtx, year: number, f: ActivityFilters, view: MatrixView = 'grupos', withDetail = true) {
     const [matrix, summary, plan, institution, nit, color, format] = await Promise.all([
-      this.plans.matrix(ctx, year, f, view),
+      // Los formatos impresos muestran una fila por categoría
+      this.plans.matrix(ctx, year, f, view, true),
       this.plans.summary(ctx, year, f),
       this.plans.getPlan(year),
       this.settings.get<string>('institution.name'),

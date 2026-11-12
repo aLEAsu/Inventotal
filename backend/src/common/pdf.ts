@@ -1,11 +1,11 @@
 import { jsPDF } from 'jspdf';
 import { autoTable, type UserOptions } from 'jspdf-autotable';
-import { LOGO_POSMEDICA, LOGO_UNOP } from './brand-logos';
+import { LOGO_UNOP } from './brand-logos';
 import { fmtDateTimeBogota } from './dates';
 
 type Logo = { data: string; width: number; height: number };
-/** Logos institucionales que encabezan todos los formatos (POSMEDICA S.A.S y UNO-P) */
-export const INSTITUTION_LOGOS: Logo[] = [LOGO_POSMEDICA, LOGO_UNOP];
+/** Logo institucional que encabeza todos los formatos (UNO-P) */
+export const INSTITUTION_LOGOS: Logo[] = [LOGO_UNOP];
 
 export interface DocHeader {
   institution: string;

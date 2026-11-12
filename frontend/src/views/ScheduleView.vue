@@ -47,7 +47,9 @@ const loading = ref(false);
 const sort = ref({ field: 'committedDate', order: 1 });
 const page = ref({ first: 0, rows: 50 });
 
-const params = computed(() => ({ ...Object.fromEntries(Object.entries(f.value).filter(([, v]) => v !== null && v !== '')), scheduleType: scheduleType.value }));
+/** Mostrar también las actividades quitadas del cronograma (canceladas / no aplica) */
+const showRemoved = ref(false);
+const params = computed(() => ({ ...Object.fromEntries(Object.entries(f.value).filter(([, v]) => v !== null && v !== '')), scheduleType: scheduleType.value, ...(showRemoved.value ? {} : { excludeRemoved: '1' }) }));
 
 async function loadPlan() {
   plan.value = (await http.get(`/plans/${year.value}`)).data.plan;
@@ -110,6 +112,7 @@ watch([scheduleType, view], ([tipo, vista]) => {
   page.value.first = 0;
   void loadData();
 });
+watch(showRemoved, () => void loadData());
 watch(year, (y) => {
   void router.replace({ query: { ...route.query, year: String(y) } });
   page.value.first = 0;
@@ -352,7 +355,7 @@ async function runBulk(action: 'RESCHEDULE' | 'ASSIGN' | 'CANCELADO' | 'NO_APLIC
   if (!groupSel.value.length) return;
   let reasonText = bulkForm.value.reason;
   if (['CANCELADO', 'NO_APLICA', 'PROGRAMADO'].includes(action)) {
-    const label = { CANCELADO: 'Cancelar actividades seleccionadas', NO_APLICA: 'Marcar como no aplica', PROGRAMADO: 'Restituir actividades' }[action as 'CANCELADO'];
+    const label = { CANCELADO: 'Cancelar actividades seleccionadas', NO_APLICA: 'Quitar del cronograma', PROGRAMADO: 'Dejar de nuevo en el cronograma' }[action as 'CANCELADO'];
     const why = await reason.value!.ask({ title: `${label} (${groupSel.value.length})`, danger: action !== 'PROGRAMADO', message: 'Los registros se conservan y quedan en la trazabilidad del plan.' });
     if (!why) return;
     reasonText = why;
@@ -366,11 +369,81 @@ async function runBulk(action: 'RESCHEDULE' | 'ASSIGN' | 'CANCELADO' | 'NO_APLIC
   const r = await n.run(() => http.post(`/plans/${year.value}/activities/bulk`, body));
   if (r) {
     const d = r.data;
-    n.ok(d.pendingApproval ? `${d.applied} aplicadas · ${d.pendingApproval} enviadas para aprobación` : `${d.applied} actividad(es) actualizadas`);
+    n.ok(bulkMessage(d));
     groupedCellVisible.value = false;
     await reload();
   }
 }
+/** Resumen del resultado de una edición en lote */
+function bulkMessage(d: { applied: number; pendingApproval?: number; skipped?: number }) {
+  const parts = [`${d.applied} actividad(es) actualizadas`];
+  if (d.pendingApproval) parts.push(`${d.pendingApproval} enviadas para aprobación`);
+  if (d.skipped) parts.push(`${d.skipped} omitidas (ejecutadas, con orden activa o que no admiten el cambio)`);
+  return parts.join(' · ');
+}
+
+// --------------------------------------------- Modo edición del cronograma (mover, quitar, dejar, responsable)
+const editMode = ref(false);
+const canMove = computed(() => planEditable.value && auth.can('schedule.reschedule'));
+const canRemove = computed(() => planEditable.value && auth.canAny('plans.generate', 'plans.approve'));
+const canEditSchedule = computed(() => planEditable.value && (canMove.value || canRemove.value || auth.can('schedule.assign')));
+const PENDING_DISPLAY = ['PROGRAMADO', 'REPROGRAMADO', 'PROXIMO', 'VENCIDO'];
+type EditAction = 'RESCHEDULE' | 'ASSIGN' | 'NO_APLICA' | 'PROGRAMADO';
+const editDlg = ref({ visible: false, action: 'RESCHEDULE' as EditAction, title: '', detail: '', ids: [] as string[], toDate: null as Date | null, responsibleId: null as string | null, reason: '', autoApprove: false });
+const rowActivities = (r: Record<string, any>) => (r.months as Record<string, any>[][]).flat().flatMap((c) => c.activities as { id: string; status: string }[]);
+function openEdit(action: EditAction, title: string, detail: string, ids: string[], toDate: Date | null = null) {
+  if (!ids.length) {
+    n.info('No hay actividades que admitan este cambio en la selección.');
+    return;
+  }
+  editDlg.value = { visible: true, action, title, detail, ids, toDate, responsibleId: null, reason: '', autoApprove: auth.can('plans.approve') };
+}
+function rowLabel(r: Record<string, any>) {
+  return view.value === 'grupos' ? `${r.targetName} · ${r.programName}` : `${r.assetCode} · ${r.assetName}`;
+}
+function editRow(action: EditAction, r: Record<string, any>) {
+  const acts = rowActivities(r);
+  const ids = (action === 'PROGRAMADO' ? acts.filter((a) => ['CANCELADO', 'NO_APLICA'].includes(a.status)) : action === 'ASSIGN' ? acts.filter((a) => !['EJECUTADO', 'CANCELADO', 'NO_APLICA'].includes(a.status)) : acts.filter((a) => PENDING_DISPLAY.includes(a.status))).map((a) => a.id);
+  const titles = { NO_APLICA: 'Quitar la fila del cronograma', PROGRAMADO: 'Dejar de nuevo en el cronograma', ASSIGN: 'Asignar responsable a toda la fila', RESCHEDULE: 'Mover' };
+  openEdit(action, titles[action], `${rowLabel(r)} · ${ids.length} actividad(es)`, ids);
+}
+// Arrastrar una fecha a otro mes de la misma fila = moverla (se conserva el día, ajustado al largo del mes)
+const drag = ref<{ rowId: string; cell: Record<string, any> } | null>(null);
+function onDragStart(e: DragEvent, r: Record<string, any>, cell: Record<string, any>) {
+  drag.value = { rowId: r.rowId, cell };
+  e.dataTransfer?.setData('text/plain', cell.id);
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+}
+function onDrop(r: Record<string, any>, monthIndex: number) {
+  const d = drag.value;
+  drag.value = null;
+  if (!d || d.rowId !== r.rowId) {
+    if (d) n.info('Arrastre la fecha a otro mes de la misma fila.');
+    return;
+  }
+  const last = new Date(Date.UTC(year.value, monthIndex + 1, 0)).getUTCDate();
+  const day = Math.min(Number(String(d.cell.date).slice(8, 10)), last);
+  const target = `${year.value}-${String(monthIndex + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  if (target === d.cell.date) return;
+  const ids = (d.cell.activities as { id: string; status: string }[]).filter((a) => PENDING_DISPLAY.includes(a.status)).map((a) => a.id);
+  openEdit('RESCHEDULE', 'Mover fecha del cronograma', `${rowLabel(r)} · del ${fmtDate(d.cell.date)} · ${ids.length} actividad(es)`, ids, ymdToDate(target));
+}
+async function runEdit() {
+  const e = editDlg.value;
+  const body = {
+    ids: e.ids, action: e.action, reason: e.reason || null, autoApprove: e.autoApprove,
+    toDate: e.action === 'RESCHEDULE' ? dateToYmd(e.toDate) : undefined,
+    responsibleId: e.action === 'ASSIGN' ? e.responsibleId : undefined,
+  };
+  const r = await n.run(() => http.post(`/plans/${year.value}/activities/bulk`, body));
+  if (r) {
+    n.ok(bulkMessage(r.data));
+    editDlg.value.visible = false;
+    await reload();
+  }
+}
+const editNeedsReason = computed(() => editDlg.value.action !== 'ASSIGN');
+
 const cellClass = (s: string) => `st-${s}`;
 const statusOpts = opts(ACTIVITY_STATUS);
 const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name}`;
@@ -474,6 +547,16 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
                   <div class="bar"><span :style="{ width: `${pct(matrix.executed, matrix.total)}%` }" /></div>
                 </div>
               </div>
+              <div class="edit-bar">
+                <label v-if="canEditSchedule" class="row"><ToggleSwitch v-model="editMode" data-testid="edit-mode" /> <strong>Editar cronograma</strong></label>
+                <label class="row"><Checkbox v-model="showRemoved" binary /> Mostrar actividades quitadas</label>
+                <span v-if="editMode" class="muted small edit-help">
+                  <i class="pi pi-arrows-h" /> Arrastre una fecha a otro mes para <b>moverla</b> ·
+                  clic en una fecha para <b>moverla, quitarla o dejarla</b> por equipo ·
+                  botones de cada fila para <b>quitar / dejar</b> toda la fila o asignar responsable.
+                  Lo quitado no se borra: queda en el historial y se puede volver a dejar.
+                </span>
+              </div>
               <div class="legend">
                 <span v-for="o in statusOpts" :key="o.value" class="lg" :class="cellClass(o.value)">{{ o.label }}</span>
                 <span class="muted">· {{ view === 'grupos' ? 'Celda: día del mes y equipos (ejecutados/programados); el color es el estado más urgente. Clic para ver los equipos.' : 'El número es el día del mes · ↻ reprogramada' }}</span>
@@ -512,12 +595,17 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
                           <RouterLink :to="`/activos/${r.assetId}`" class="mono">{{ r.assetCode }}</RouterLink> {{ r.assetName }}
                           <div class="muted small">{{ r.targetName }} · {{ r.programName }}</div>
                         </template>
+                        <div v-if="editMode" class="row-actions" data-testid="row-actions">
+                          <Button v-if="canRemove" v-tooltip.top="'Quitar toda la fila del cronograma'" icon="pi pi-eye-slash" size="small" text rounded severity="danger" aria-label="Quitar fila" @click="editRow('NO_APLICA', r)" />
+                          <Button v-if="canRemove && showRemoved" v-tooltip.top="'Dejar de nuevo las actividades quitadas de la fila'" icon="pi pi-replay" size="small" text rounded aria-label="Dejar fila" @click="editRow('PROGRAMADO', r)" />
+                          <Button v-if="auth.can('schedule.assign')" v-tooltip.top="'Asignar responsable a toda la fila'" icon="pi pi-user-edit" size="small" text rounded aria-label="Responsable de la fila" @click="editRow('ASSIGN', r)" />
+                        </div>
                       </td>
                       <td v-if="view === 'grupos'" class="c"><span class="badge">{{ r.assetCount }}</span></td>
                       <td class="small per">{{ r.frequency }}</td>
                       <td class="small resp">{{ r.responsible ?? '—' }}</td>
-                      <td v-for="(cell, mi) in r.months" :key="mi" class="mc" :class="{ cur: mi === currentMonth }">
-                        <button v-for="x in cell" :key="x.id" class="chip" :class="[cellClass(x.status), { mixed: x.mixed }]" :title="matrixCellTitle(x, view === 'grupos')" @click="openMatrixCell(x, r)">
+                      <td v-for="(cell, mi) in r.months" :key="mi" class="mc" :class="{ cur: mi === currentMonth, droptarget: editMode && drag?.rowId === r.rowId }" @dragover="(e) => editMode && drag?.rowId === r.rowId && e.preventDefault()" @drop.prevent="onDrop(r, Number(mi))">
+                        <button v-for="x in cell" :key="x.id" class="chip" :class="[cellClass(x.status), { mixed: x.mixed, movable: editMode && canMove }]" :title="matrixCellTitle(x, view === 'grupos')" :draggable="editMode && canMove" @dragstart="(e) => onDragStart(e, r, x)" @dragend="drag = null" @click="openMatrixCell(x, r)">
                           <span class="d">{{ x.day }}<span v-if="x.rescheduled">↻</span></span>
                           <template v-if="view === 'grupos'">
                             <span class="n">{{ x.executed ? `${x.executed}/${x.count}` : `${x.count} eq` }}</span>
@@ -678,12 +766,11 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
           <div class="row">
             <strong>Modificar {{ groupSel.length }} seleccionada(s)</strong>
             <span class="spacer" />
-            <Button v-if="auth.can('schedule.reschedule')" label="Cambiar fecha" icon="pi pi-calendar" size="small" :outlined="bulkForm.mode !== 'RESCHEDULE'" :disabled="!groupSel.length" data-testid="bulk-reschedule" @click="bulkForm.mode = bulkForm.mode === 'RESCHEDULE' ? null : 'RESCHEDULE'" />
+            <Button v-if="auth.can('schedule.reschedule')" label="Mover a otra fecha" icon="pi pi-calendar" size="small" :outlined="bulkForm.mode !== 'RESCHEDULE'" :disabled="!groupSel.length" data-testid="bulk-reschedule" @click="bulkForm.mode = bulkForm.mode === 'RESCHEDULE' ? null : 'RESCHEDULE'" />
             <Button v-if="auth.can('schedule.assign')" label="Asignar responsable" icon="pi pi-user" size="small" :outlined="bulkForm.mode !== 'ASSIGN'" :disabled="!groupSel.length" @click="bulkForm.mode = bulkForm.mode === 'ASSIGN' ? null : 'ASSIGN'" />
             <template v-if="auth.canAny('plans.generate', 'plans.approve')">
-              <Button label="No aplica" size="small" text severity="secondary" :disabled="!groupSel.length" @click="runBulk('NO_APLICA')" />
-              <Button label="Cancelar" size="small" text severity="danger" :disabled="!groupSel.length" @click="runBulk('CANCELADO')" />
-              <Button label="Restituir" size="small" text :disabled="!groupSel.length" @click="runBulk('PROGRAMADO')" />
+              <Button label="Quitar del cronograma" icon="pi pi-eye-slash" size="small" text severity="danger" :disabled="!groupSel.length" data-testid="bulk-remove" @click="runBulk('NO_APLICA')" />
+              <Button label="Dejar (restituir)" icon="pi pi-replay" size="small" text :disabled="!groupSel.length" @click="runBulk('PROGRAMADO')" />
             </template>
           </div>
           <div v-if="bulkForm.mode === 'RESCHEDULE'" class="form mt">
@@ -698,6 +785,23 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
             <div><Button label="Asignar" icon="pi pi-check" :disabled="!groupSel.length" @click="runBulk('ASSIGN')" /></div>
           </div>
         </div>
+      </template>
+    </Dialog>
+
+    <!-- Edición del cronograma (mover / quitar / dejar / responsable) -->
+    <Dialog v-model:visible="editDlg.visible" modal :header="editDlg.title" :style="{ width: '560px', maxWidth: '95vw' }">
+      <p class="mb">{{ editDlg.detail }}</p>
+      <Message v-if="editDlg.action === 'NO_APLICA'" severity="warn" :closable="false" class="mb">Las actividades se quitan del cronograma (no se imprimen ni cuentan) pero quedan en el historial; puede volver a dejarlas con «Mostrar actividades quitadas».</Message>
+      <Message v-if="editDlg.action === 'RESCHEDULE' && plan?.status === 'APROBADO'" severity="info" :closable="false" class="mb">El plan está aprobado: la fecha aprobada se conserva y el cambio requiere aprobación.</Message>
+      <div class="form">
+        <div v-if="editDlg.action === 'RESCHEDULE'" class="field"><label>Nueva fecha <span class="req">*</span></label><DatePicker v-model="editDlg.toDate" date-format="dd/mm/yy" show-icon :min-date="ymdToDate(`${year}-01-01`)!" :max-date="ymdToDate(`${year}-12-31`)!" data-testid="edit-date" /></div>
+        <div v-if="editDlg.action === 'RESCHEDULE' && plan?.status === 'APROBADO' && auth.can('plans.approve')" class="field"><label class="row"><Checkbox v-model="editDlg.autoApprove" binary /> Aprobar en el mismo acto</label></div>
+        <div v-if="editDlg.action === 'ASSIGN'" class="field full"><label>Responsable</label><Select v-model="editDlg.responsibleId" :options="cat.executors" option-label="fullName" option-value="id" show-clear filter placeholder="Sin responsable" /></div>
+        <div v-if="editNeedsReason" class="field full"><label>Justificación <span class="req">*</span></label><Textarea v-model="editDlg.reason" rows="2" data-testid="edit-reason" /></div>
+      </div>
+      <template #footer>
+        <Button label="Cancelar" text @click="editDlg.visible = false" />
+        <Button :label="editDlg.action === 'NO_APLICA' ? 'Quitar' : editDlg.action === 'PROGRAMADO' ? 'Dejar' : editDlg.action === 'ASSIGN' ? 'Asignar' : 'Mover'" :severity="editDlg.action === 'NO_APLICA' ? 'danger' : undefined" icon="pi pi-check" :disabled="(editNeedsReason && editDlg.reason.trim().length < 10) || (editDlg.action === 'RESCHEDULE' && !editDlg.toDate)" data-testid="edit-apply" @click="runEdit" />
       </template>
     </Dialog>
 
@@ -798,6 +902,11 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
 
 <style scoped>
 .hint-banner :deep(.p-message-text) { width: 100%; }
+.edit-bar { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; margin-bottom: 10px; padding: 8px 10px; border: 1px dashed var(--app-border); border-radius: 8px; background: #fbfdff; }
+.edit-help { flex-basis: 100%; }
+.row-actions { display: flex; gap: 2px; margin-top: 4px; }
+.chip.movable { cursor: grab; }
+.mx td.droptarget { outline: 2px dashed #0369a1; outline-offset: -3px; }
 .out-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px; }
 .plan-notes { margin-top: 4px; color: #334155; white-space: pre-line; }
 .bulk { border: 1px solid var(--app-border); border-radius: 8px; padding: 10px 12px; background: #f8fafc; }

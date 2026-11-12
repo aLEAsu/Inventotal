@@ -24,8 +24,10 @@ const Filters = z.object({
   q: z.string().trim().max(100).optional(),
   /** Cronograma: PREVENTIVO (todo menos correctivo) o CORRECTIVO */
   scheduleType: z.enum(['PREVENTIVO', 'CORRECTIVO']).optional(),
+  /** 1 = ocultar actividades quitadas (canceladas / no aplica) */
+  excludeRemoved: z.enum(['0', '1']).optional().transform((v) => v === '1'),
 });
-const MatrixQuery = Filters.extend({ view: z.enum(['grupos', 'equipos']).default('grupos') });
+const MatrixQuery = Filters.extend({ view: z.enum(['grupos', 'equipos']).default('grupos'), split: z.enum(['0', '1']).default('0') });
 const ListQuery = Filters.extend({
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(1000).default(100),
@@ -159,7 +161,8 @@ export class PlansController {
   @ApiZQuery(MatrixQuery)
   matrix(@Ctx() ctx: ReqCtx, @Param('year', ParseIntPipe) year: number, @ZQuery(MatrixQuery) q: z.infer<typeof MatrixQuery>) {
     const { view, ...f } = q;
-    return this.svc.matrix(ctx, year, f, view);
+    const { split, ...rest } = f;
+    return this.svc.matrix(ctx, year, rest, view, split === '1');
   }
 
   @Get('plans/:year/coverage')
