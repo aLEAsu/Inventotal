@@ -319,6 +319,21 @@ describe('4-6. Programas preventivos y generación del cronograma', () => {
     expect((v.body.items as { committedDate: string; displayStatus: string }[]).every((a) => a.committedDate < todayBogota() && a.displayStatus === 'VENCIDO')).toBe(true);
   });
 
+  it('permite programar una subcategoría aún sin equipos y el catálogo informa cuántos tiene', async () => {
+    const cats = (await c.coord.get('/categories')).body as { id: string; assetCount: number; subcategories: { id: string; assetCount: number }[] }[];
+    expect(cats.every((x) => typeof x.assetCount === 'number')).toBe(true);
+    const sub = await c.coord.post('/subcategories', { categoryId: cats[0].id, name: 'Subcategoría vacía de prueba' });
+    expect(sub.status).toBe(201);
+    const after = (await c.coord.get('/categories')).body as typeof cats;
+    expect(after.find((x) => x.id === cats[0].id)!.subcategories.find((s) => s.id === sub.body.id)!.assetCount).toBe(0);
+    const p = await c.coord.post('/programs', {
+      targetType: 'SUBCATEGORIA', displayMode: 'AGRUPADO', categoryId: cats[0].id, subcategoryId: sub.body.id,
+      name: 'Preventivo de equipos futuros', frequencyType: 'TRIMESTRAL', startDate: `${YEAR}-01-01`, baseDate: `${YEAR}-01-15`,
+      frequencyJustification: 'Programa definido antes de recibir los equipos',
+    });
+    expect(p.status).toBe(201);
+  });
+
   it('cronograma correctivo: se genera por separado sin excluir el preventivo y la vista por grupos consolida filas', async () => {
     const p = await c.coord.post('/programs', {
       assetId: ids.asset_UPS, kind: 'CORRECTIVO', name: 'Cambio programado de baterías', frequencyType: 'ANUAL',

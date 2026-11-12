@@ -193,6 +193,14 @@ const formSchedule = computed({
   get: () => (form.value.kind === 'CORRECTIVO' ? 'CORRECTIVO' : 'PREVENTIVO'),
   set: (v: string) => { form.value.kind = v === 'CORRECTIVO' ? 'CORRECTIVO' : 'PREVENTIVO'; },
 });
+/** Etiqueta con el número de equipos habilitados que tomará el programa */
+const withCount = (o: { name: string; assetCount?: number }) => o.assetCount === undefined ? o.name : `${o.name} · ${o.assetCount ? `${o.assetCount} equipo${o.assetCount === 1 ? '' : 's'}` : 'sin equipos aún'}`;
+const selectedTargetCount = computed(() => {
+  const c = cat.categories.find((x) => x.id === form.value.categoryId);
+  if (form.value.targetType === 'SUBCATEGORIA') return c?.subcategories.find((s) => s.id === form.value.subcategoryId)?.assetCount;
+  if (form.value.targetType === 'CATEGORIA') return c?.assetCount;
+  return undefined;
+});
 const preventiveKinds = opts(KIND).filter((o) => o.value !== 'CORRECTIVO');
 const monthOptions = MONTHS.map((label, index) => ({ label, value: index + 1 }));
 const weekOptions = [{ label: '1.ª semana', value: 1 }, { label: '2.ª semana', value: 2 }, { label: '3.ª semana', value: 3 }, { label: '4.ª semana', value: 4 }, { label: 'Última semana', value: -1 }];
@@ -259,8 +267,9 @@ const weekdayOptions = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'S
         </div>
         <div v-if="form.targetType === 'ACTIVO'" class="field full"><label>Activo <span class="req">*</span></label><Select v-model="form.assetId" :options="cat.assets" :option-label="assetLabel" option-value="id" filter placeholder="Seleccione el equipo o sistema" :disabled="!!form.id" /></div>
         <template v-if="form.targetType === 'CATEGORIA' || form.targetType === 'SUBCATEGORIA'">
-          <div class="field"><label>Categoría <span class="req">*</span></label><Select v-model="form.categoryId" :options="cat.categories.filter((c) => c.isActive)" option-label="name" option-value="id" filter placeholder="Seleccione una categoría" /></div>
-          <div v-if="form.targetType === 'SUBCATEGORIA'" class="field"><label>Subcategoría <span class="req">*</span></label><Select v-model="form.subcategoryId" :options="cat.categories.find((c) => c.id === form.categoryId)?.subcategories.filter((s) => s.isActive) ?? []" option-label="name" option-value="id" filter placeholder="Seleccione una subcategoría" /></div>
+          <div class="field"><label>Categoría <span class="req">*</span></label><Select v-model="form.categoryId" :options="cat.categories.filter((c) => c.isActive)" :option-label="withCount" option-value="id" filter placeholder="Seleccione una categoría" /></div>
+          <div v-if="form.targetType === 'SUBCATEGORIA'" class="field"><label>Subcategoría <span class="req">*</span></label><Select v-model="form.subcategoryId" :options="cat.categories.find((c) => c.id === form.categoryId)?.subcategories.filter((s) => s.isActive) ?? []" :option-label="withCount" option-value="id" filter placeholder="Seleccione una subcategoría" /></div>
+          <Message v-if="selectedTargetCount === 0" severity="warn" :closable="false" class="field full">Esta agrupación aún no tiene equipos: el programa se guarda, pero no generará actividades hasta que se registren equipos en ella.</Message>
         </template>
         <div v-if="form.targetType === 'GRUPO'" class="field full"><label>Agrupación personalizada <span class="req">*</span></label><Select v-model="form.groupId" :options="groups.filter((g) => g.isActive)" option-label="name" option-value="id" filter placeholder="Seleccione una agrupación" /><small>Edite los miembros del grupo para incorporar o retirar equipos.</small></div>
         <div v-if="form.targetType !== 'ACTIVO'" class="field full"><label>Presentación en el cronograma</label><Select v-model="form.displayMode" :options="[{ label: 'Una fila agrupada con desglose por equipo', value: 'AGRUPADO' }, { label: 'Una fila por cada equipo', value: 'POR_ACTIVO' }]" option-label="label" option-value="value" /><small>Ambas opciones conservan actividades, órdenes y seguimiento individual por equipo.</small></div>
