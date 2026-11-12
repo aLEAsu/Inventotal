@@ -90,7 +90,8 @@ export class DocumentsController {
     await this.assertLinkAccess(ctx, meta, true);
     const allowed = await this.settings.get<string[]>('documents.allowedTypes');
     const maxMb = await this.settings.get<number>('documents.maxSizeMb');
-    const envMax = Number(process.env.MAX_UPLOAD_MB ?? maxMb);
+    // Vercel rechaza cuerpos de más de 4,5 MB: se limita para responder con un error claro
+    const envMax = Math.min(Number(process.env.MAX_UPLOAD_MB ?? maxMb), process.env.VERCEL ? 4 : Infinity);
     const name = Buffer.from(file.originalname, 'latin1').toString('utf8').replace(/[\\/\0]/g, '_').slice(0, 200);
     const saved = await this.storage.save(file.buffer, name, file.mimetype, allowed, Math.min(maxMb, envMax) * 1048576);
     const doc = await this.prisma.document.create({
@@ -121,7 +122,7 @@ export class DocumentsController {
     res.setHeader('Cache-Control', 'private, no-store');
     const inline = d.mimeType.startsWith('image/') || d.mimeType === 'application/pdf';
     res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(d.originalName)}`);
-    this.storage.stream(d.storedName).pipe(res);
+    res.send(await this.storage.read(d.storedName));
   }
 
   /** Anulación lógica: el archivo y su registro se conservan para trazabilidad */

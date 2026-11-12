@@ -28,7 +28,9 @@ async function bootstrap() {
   app.useLogger(app.get(Logger));
   configureApp(app);
   app.useBodyParser('json', { limit: '2mb' });
-  if (process.env.SWAGGER_ENABLED !== 'false') {
+  // Documentación de la API: activa en desarrollo; en producción solo con SWAGGER_ENABLED=true
+  const swagger = process.env.SWAGGER_ENABLED === 'true' || (process.env.NODE_ENV !== 'production' && process.env.SWAGGER_ENABLED !== 'false');
+  if (swagger) {
     const cfg = new DocumentBuilder()
       .setTitle('SIGM — API')
       .setDescription('Sistema Integral de Gestión de Mantenimiento. Autenticación por cookie de sesión HttpOnly + cabecera X-CSRF-Token en operaciones de escritura.')
