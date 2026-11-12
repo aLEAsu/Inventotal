@@ -15,6 +15,8 @@ const Filters = z.object({
   areaId: z.string().uuid().optional(),
   categoryId: z.string().uuid().optional(),
   assetId: z.string().uuid().optional(),
+  /** Un solo programa del plan maestro (para imprimir o exportar ese cronograma) */
+  programId: z.string().uuid().optional(),
   responsibleId: z.string().uuid().optional(),
   criticality: z.enum(['CRITICA', 'ALTA', 'MEDIA', 'BAJA']).optional(),
   status: DSTATUS.optional(),
@@ -188,7 +190,7 @@ export class PlansController {
     const buf = await this.exporter.pdf(ctx, year, f, paper, view, annex === '1');
     await this.audit.log(ctx, { action: 'EXPORTAR_PDF', module: 'cronograma', entity: 'AnnualPlan', entityId: String(year), after: { filtros: f, paper, bytes: buf.length } });
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="Plan_Anual_Mantenimiento_${year}.pdf"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${await this.exporter.fileBase(year, f)}.pdf"`);
     res.send(buf);
   }
 
@@ -200,7 +202,7 @@ export class PlansController {
     const buf = await this.exporter.xlsx(ctx, year, f, view);
     await this.audit.log(ctx, { action: 'EXPORTAR_EXCEL', module: 'cronograma', entity: 'AnnualPlan', entityId: String(year), after: { filtros: f, bytes: buf.length } });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="Plan_Anual_Mantenimiento_${year}.xlsx"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${await this.exporter.fileBase(year, f)}.xlsx"`);
     res.send(buf);
   }
 

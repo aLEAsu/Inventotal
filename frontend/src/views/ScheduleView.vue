@@ -21,7 +21,7 @@ const year = ref<number>(Number(route.query.year) || cat.year);
 const years = computed(() => Array.from({ length: 12 }, (_, i) => cat.year + 2 - i));
 const plan = ref<Record<string, any> | null>(null);
 const tab = ref('matrix');
-const f = ref({ month: null as number | null, areaId: null as string | null, categoryId: null as string | null, assetId: null as string | null, responsibleId: null as string | null, criticality: null as string | null, status: null as string | null, kind: null as string | null, q: '' });
+const f = ref({ month: null as number | null, areaId: null as string | null, categoryId: null as string | null, assetId: null as string | null, programId: null as string | null, responsibleId: null as string | null, criticality: null as string | null, status: null as string | null, kind: null as string | null, q: '' });
 type ScheduleType = 'PREVENTIVO' | 'CORRECTIVO';
 const scheduleType = ref<ScheduleType>(route.query.tipo === 'CORRECTIVO' ? 'CORRECTIVO' : 'PREVENTIVO');
 const view = ref<'grupos' | 'equipos'>(route.query.vista === 'equipos' ? 'equipos' : 'grupos');
@@ -77,6 +77,17 @@ async function loadData() {
     loading.value = false;
   }
 }
+type ScheduleProgram = { id: string; code: string; name: string; isActive: boolean; targetName: string | null };
+const schedulePrograms = ref<ScheduleProgram[]>([]);
+async function loadSchedulePrograms() {
+  try {
+    const r = await http.get('/programs', { params: { scheduleType: scheduleType.value, pageSize: 500 } });
+    schedulePrograms.value = r.data.items;
+  } catch {
+    schedulePrograms.value = [];
+  }
+}
+const programFilterLabel = (x: ScheduleProgram) => `${x.code} · ${x.name}${x.isActive ? '' : ' (inactivo)'}`;
 async function loadHistory() {
   if (!plan.value) return;
   history.value = (await http.get(`/plans/${year.value}/history`)).data;
@@ -90,6 +101,10 @@ async function reload() {
     n.error(e);
   }
 }
+watch(scheduleType, () => {
+  f.value.programId = null;
+  void loadSchedulePrograms();
+});
 watch([scheduleType, view], ([tipo, vista]) => {
   void router.replace({ query: { ...route.query, tipo, vista } });
   page.value.first = 0;
@@ -111,7 +126,7 @@ watch(f, () => {
 onMounted(async () => {
   await cat.load();
   if (!route.query.year) year.value = cat.year;
-  await Promise.all([reload(), cat.loadAssets()]);
+  await Promise.all([reload(), cat.loadAssets(), loadSchedulePrograms()]);
 });
 
 // --------------------------------------------- Flujo del plan
@@ -146,17 +161,26 @@ async function transition(action: 'submit' | 'review' | 'return' | 'approve' | '
   if (why === null) return;
   if (await n.run(() => http.post(`/plans/${year.value}/${action}`, { reason: why || null }), 'Estado del plan actualizado')) await reload();
 }
+/** Diálogo de salida: el usuario elige qué cronograma (todos los programas o uno) y en qué formato */
+const out = ref({ visible: false, programId: null as string | null, view: 'grupos' as 'grupos' | 'equipos' });
+const outPrograms = computed(() => [{ id: null as string | null, label: `Todos los programas ${typeLabel.value}s` }, ...schedulePrograms.value.map((x) => ({ id: x.id as string | null, label: programFilterLabel(x) }))]);
+function openOutput() {
+  out.value = { visible: true, programId: f.value.programId, view: view.value };
+}
+const outParams = () => {
+  const q: Record<string, string> = { ...(params.value as Record<string, string>), view: out.value.view };
+  if (out.value.programId) q.programId = out.value.programId;
+  else delete q.programId;
+  return q;
+};
+const outFileBase = () => {
+  const code = schedulePrograms.value.find((x) => x.id === out.value.programId)?.code;
+  return `Cronograma_${typeLabel.value}${code ? `_${code}` : ''}_${year.value}`;
+};
 const exp = (kind: 'pdf' | 'xlsx', paper?: 'a4' | 'a3', annex = false) =>
-  n.run(() => download(`/plans/${year.value}/export.${kind}`, { ...params.value, view: view.value, paper, annex: annex ? '1' : undefined }, `Cronograma_${typeLabel.value}_${year.value}.${kind}`), kind === 'pdf' ? 'PDF descargado' : 'Excel descargado');
-const exportMenu = ref();
-const exportItems = computed(() => [
-  { label: 'PDF A4 · una hoja', icon: 'pi pi-file-pdf', command: () => exp('pdf', 'a4') },
-  { label: 'PDF A3 · una hoja', icon: 'pi pi-file-pdf', command: () => exp('pdf', 'a3') },
-  { label: 'PDF con anexo por equipo', icon: 'pi pi-copy', command: () => exp('pdf', 'a4', true) },
-  { label: 'Excel', icon: 'pi pi-file-excel', command: () => exp('xlsx') },
-]);
+  n.run(() => download(`/plans/${year.value}/export.${kind}`, { ...outParams(), paper, annex: annex ? '1' : undefined }, `${outFileBase()}.${kind}`), kind === 'pdf' ? 'PDF descargado' : 'Excel descargado');
 function printView() {
-  const q = new URLSearchParams({ ...(params.value as Record<string, string>), view: view.value }).toString();
+  const q = new URLSearchParams(outParams()).toString();
   window.open(`/imprimir/cronograma/${year.value}${q ? `?${q}` : ''}`, '_blank');
 }
 
@@ -263,6 +287,8 @@ async function decide(id: string, approve: boolean) {
 }
 const inspection = () => n.run(() => download(`/reports/inspection/${act.value!.id}.pdf`), 'Formato F-08 generado');
 
+/** Filtros de pantalla aplicados además del programa (se aplican también a la salida) */
+const activeFilterCount = computed(() => Object.entries(f.value).filter(([k, v]) => k !== 'programId' && v !== null && v !== '').length);
 const canEditPlan = computed(() => plan.value && ['BORRADOR', 'APROBADO'].includes(plan.value.status));
 
 // --------------------------------------------- Editar datos del plan
@@ -367,9 +393,7 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
       </div>
       <div class="actions">
         <template v-if="plan && auth.can('plans.export')">
-          <Button label="Imprimir (una hoja)" icon="pi pi-print" severity="secondary" outlined data-testid="btn-print" @click="printView" />
-          <Button label="Exportar" icon="pi pi-download" severity="secondary" outlined data-testid="btn-export" aria-haspopup="true" @click="(e) => exportMenu.toggle(e)" />
-          <Menu ref="exportMenu" :model="exportItems" popup />
+          <Button label="Imprimir / exportar" icon="pi pi-print" severity="secondary" outlined data-testid="btn-print" @click="openOutput" />
         </template>
       </div>
     </div>
@@ -421,6 +445,7 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
         <Select v-model="f.month" :options="MONTHS.map((l, i) => ({ l, v: i + 1 }))" option-label="l" option-value="v" placeholder="Mes" show-clear />
         <Select v-model="f.areaId" :options="cat.areas" option-label="name" option-value="id" placeholder="Área" show-clear filter />
         <Select v-model="f.categoryId" :options="cat.categories" option-label="name" option-value="id" placeholder="Categoría" show-clear />
+        <Select v-model="f.programId" :options="schedulePrograms" :option-label="programFilterLabel" option-value="id" placeholder="Programa / cronograma" show-clear filter data-testid="filter-program" />
         <Select v-model="f.assetId" :options="cat.assets" :option-label="assetLabel" option-value="id" placeholder="Activo" show-clear filter />
         <Select v-model="f.responsibleId" :options="cat.users" option-label="fullName" option-value="id" placeholder="Responsable" show-clear filter />
         <Select v-model="f.criticality" :options="opts(CRITICALITY)" option-label="label" option-value="value" placeholder="Criticidad" show-clear />
@@ -676,6 +701,29 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
       </template>
     </Dialog>
 
+    <!-- Imprimir / exportar -->
+    <Dialog v-model:visible="out.visible" modal header="Imprimir o exportar cronograma" :style="{ width: '600px', maxWidth: '95vw' }">
+      <div class="form">
+        <div class="field full">
+          <label>¿Qué cronograma? <span class="req">*</span></label>
+          <Select v-model="out.programId" :options="outPrograms" option-label="label" option-value="id" filter data-testid="out-program" />
+          <small class="muted">Elija un programa del plan maestro para imprimir solo ese cronograma, o todos juntos.</small>
+        </div>
+        <div class="field full">
+          <label>Presentación</label>
+          <SelectButton v-model="out.view" :options="viewOptions" option-label="label" option-value="value" :allow-empty="false" />
+        </div>
+      </div>
+      <p v-if="activeFilterCount" class="muted small mt">Se conservan los demás filtros aplicados en pantalla ({{ activeFilterCount }}).</p>
+      <div class="out-grid mt">
+        <Button label="Vista de impresión" icon="pi pi-print" data-testid="out-print" @click="printView" />
+        <Button label="PDF A4 · una hoja" icon="pi pi-file-pdf" severity="secondary" outlined data-testid="out-pdf" @click="exp('pdf', 'a4')" />
+        <Button label="PDF A3 · una hoja" icon="pi pi-file-pdf" severity="secondary" outlined @click="exp('pdf', 'a3')" />
+        <Button label="PDF con anexo por equipo" icon="pi pi-copy" severity="secondary" outlined @click="exp('pdf', 'a4', true)" />
+        <Button label="Excel" icon="pi pi-file-excel" severity="secondary" outlined data-testid="out-xlsx" @click="exp('xlsx')" />
+      </div>
+    </Dialog>
+
     <!-- Editar datos del plan -->
     <Dialog v-model:visible="planEdit.visible" modal header="Editar datos del plan" :style="{ width: '560px', maxWidth: '95vw' }">
       <div class="form">
@@ -750,6 +798,7 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
 
 <style scoped>
 .hint-banner :deep(.p-message-text) { width: 100%; }
+.out-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px; }
 .plan-notes { margin-top: 4px; color: #334155; white-space: pre-line; }
 .bulk { border: 1px solid var(--app-border); border-radius: 8px; padding: 10px 12px; background: #f8fafc; }
 .bulk .row { flex-wrap: wrap; gap: 6px; }

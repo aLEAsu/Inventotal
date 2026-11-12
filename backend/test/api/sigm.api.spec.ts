@@ -463,6 +463,24 @@ describe('7-9. Impresión, PDF y Excel del cronograma', () => {
     expect(pages).toBeGreaterThan(8);
   });
 
+  it('imprime o exporta un solo programa (cronograma) elegido entre varios', async () => {
+    const all = await c.coord.get(`/plans/${YEAR}/matrix?scheduleType=PREVENTIVO&view=equipos`);
+    const programIds = [...new Set(all.body.rows.map((r: { programId: string }) => r.programId))] as string[];
+    expect(programIds.length).toBeGreaterThan(1);
+    const one = programIds[1];
+    const m = await c.coord.get(`/plans/${YEAR}/matrix?scheduleType=PREVENTIVO&view=equipos&programId=${one}`);
+    expect(m.status).toBe(200);
+    expect(m.body.rows.length).toBeGreaterThan(0);
+    expect(m.body.rows.every((r: { programId: string }) => r.programId === one)).toBe(true);
+    expect(m.body.program.id).toBe(one);
+    expect(m.body.total).toBeLessThan(all.body.total);
+    const pdf = await c.coord.get(`/plans/${YEAR}/export.pdf?scheduleType=PREVENTIVO&programId=${one}`).buffer(true).parse(binaryParser as never);
+    expect(pdf.status).toBe(200);
+    expect(pdf.headers['content-disposition']).toContain(m.body.program.code);
+    const x = await c.coord.get(`/plans/${YEAR}/export.xlsx?scheduleType=PREVENTIVO&programId=${one}`).buffer(true).parse(binaryParser as never);
+    expect(x.status).toBe(200);
+  });
+
   it('9. exporta Excel con las tres hojas obligatorias, filtros y fechas', async () => {
     const r = await c.coord.get(`/plans/${YEAR}/export.xlsx`).buffer(true).parse(binaryParser as never);
     expect(r.status).toBe(200);

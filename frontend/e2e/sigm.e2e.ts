@@ -97,7 +97,7 @@ test('5-9. cronograma: matriz, impresión, descarga PDF y Excel; años anteriore
   expect(xBuf.subarray(0, 2).toString()).toBe('PK');
 
   // 7. vista de impresión (sin menú ni botones al imprimir)
-  const [print] = await Promise.all([context.waitForEvent('page'), page.getByTestId('btn-print').click()]);
+  const [print] = await Promise.all([context.waitForEvent('page'), page.getByTestId('btn-print').click().then(() => page.getByTestId('out-print').click())]);
   await print.waitForLoadState();
   await expect(print.getByTestId('print-sheet')).toBeVisible();
   await expect(print.getByText('PLAN ANUAL DE MANTENIMIENTO')).toBeVisible();

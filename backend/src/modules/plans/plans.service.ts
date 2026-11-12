@@ -30,6 +30,7 @@ export interface ActivityFilters {
   areaId?: string;
   categoryId?: string;
   assetId?: string;
+  programId?: string;
   responsibleId?: string;
   criticality?: 'CRITICA' | 'ALTA' | 'MEDIA' | 'BAJA';
   status?: DisplayStatus;
@@ -483,6 +484,7 @@ export class PlansService {
         ...(f.criticality ? { criticality: f.criticality } : {}),
       },
       ...(f.assetId ? { assetId: f.assetId } : {}),
+      ...(f.programId ? { programId: f.programId } : {}),
       ...(f.responsibleId ? { responsibleId: f.responsibleId } : {}),
       program: { AND: [f.kind ? { kind: f.kind as never } : {}, scheduleKindWhere(f.scheduleType)] },
     };
@@ -683,9 +685,10 @@ export class PlansService {
       total: result.reduce((s, r) => s + r.months[i].reduce((c, x) => c + x.count, 0), 0),
       executed: result.reduce((s, r) => s + r.months[i].reduce((c, x) => c + x.executed, 0), 0),
     }));
+    const program = f.programId ? await this.prisma.maintenanceProgram.findUnique({ where: { id: f.programId }, select: { id: true, code: true, name: true, kind: true } }) : null;
     return {
       planId: plan.id, planStatus: plan.status, version: plan.version, year, today, view,
-      scheduleType: f.scheduleType ?? null,
+      scheduleType: f.scheduleType ?? null, program,
       assetCount: new Set(items.map((a) => a.asset.id)).size,
       total: result.reduce((s, r) => s + r.total, 0),
       executed: result.reduce((s, r) => s + r.executed, 0),

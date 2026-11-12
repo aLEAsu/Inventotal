@@ -82,7 +82,8 @@ onMounted(async () => {
     plan.value = p.data.plan;
     matrix.value = m.data;
     settings.value = st.data;
-    document.title = `Cronograma de mantenimiento ${typeLabel.toLowerCase()} ${year}`.replace(/\s+/g, ' ');
+    const prog = m.data.program as { code: string; name: string } | null;
+    document.title = `Cronograma de mantenimiento ${typeLabel.toLowerCase()} ${prog ? `${prog.code} ` : ''}${year}`.replace(/\s+/g, ' ');
     await fitToPage();
   } catch {
     error.value = 'No fue posible cargar el plan para impresión.';
@@ -96,6 +97,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize));
 const title = computed(() => (typeLabel ? `CRONOGRAMA DE MANTENIMIENTO ${typeLabel}` : plan.value?.title || 'PLAN ANUAL DE MANTENIMIENTO'));
 const filterText = computed(() => {
   const parts: string[] = [];
+  if (matrix.value?.program) parts.push(`Programa: ${matrix.value.program.code} · ${matrix.value.program.name}`);
   if (params.month) parts.push(`Mes: ${MONTHS[Number(params.month) - 1]}`);
   if (params.status) parts.push(`Estado: ${ACTIVITY_STATUS[String(params.status)]?.label}`);
   if (params.criticality) parts.push(`Criticidad: ${params.criticality}`);
@@ -104,7 +106,9 @@ const filterText = computed(() => {
 });
 const pct = (a: number, b: number) => (b ? Math.round((a / b) * 100) : 0);
 const cellLabel = (x: Record<string, any>) => (grouped ? `${x.day}·${x.executed ? `${x.executed}/${x.count}` : x.count}${x.rescheduled ? 'R' : ''}` : `${x.day}${SYM[x.status] ?? ''}`);
-const lastStatus = (cell: Record<string, any>[]) => (cell.length ? cell[cell.length - 1].status : '');
+const URGENCY = ['VENCIDO', 'PROXIMO', 'EN_EJECUCION', 'REPROGRAMADO', 'PROGRAMADO', 'EJECUTADO', 'CANCELADO', 'NO_APLICA'];
+/** Color del mes: el estado más urgente entre sus fechas (igual que la pantalla y el PDF) */
+const lastStatus = (cell: Record<string, any>[]) => (cell.length ? URGENCY.find((k) => cell.some((x) => x.status === k)) ?? cell[0].status : '');
 const pageStyle = computed(() => `@page { size: ${paper.value} landscape; margin: ${MARGIN}mm; }`);
 </script>
 

@@ -54,6 +54,10 @@ export class PlanExportService {
     if (f.month) parts.push(`Mes: ${MONTHS_ES[f.month - 1]}`);
     if (f.areaId) parts.push(`Área: ${(await this.prisma.area.findUnique({ where: { id: f.areaId } }))?.name}`);
     if (f.categoryId) parts.push(`Categoría: ${(await this.prisma.assetCategory.findUnique({ where: { id: f.categoryId } }))?.name}`);
+    if (f.programId) {
+      const p = await this.prisma.maintenanceProgram.findUnique({ where: { id: f.programId }, select: { code: true, name: true } });
+      if (p) parts.push(`Programa: ${p.code} · ${p.name}`);
+    }
     if (f.assetId) parts.push(`Activo: ${(await this.prisma.asset.findUnique({ where: { id: f.assetId } }))?.code}`);
     if (f.responsibleId) parts.push(`Responsable: ${(await this.prisma.user.findUnique({ where: { id: f.responsibleId } }))?.fullName}`);
     if (f.criticality) parts.push(`Criticidad: ${f.criticality}`);
@@ -62,6 +66,13 @@ export class PlanExportService {
     if (f.q) parts.push(`Búsqueda: "${f.q}"`);
     // el tipo de cronograma va en el título, no en los filtros
     return parts.join(' · ');
+  }
+
+  /** Nombre del archivo: tipo de cronograma, programa (si se eligió uno) y año */
+  async fileBase(year: number, f: ActivityFilters) {
+    const p = f.programId ? await this.prisma.maintenanceProgram.findUnique({ where: { id: f.programId }, select: { code: true } }) : null;
+    const type = f.scheduleType ? `_${SCHEDULE_TYPE_LABEL[f.scheduleType]}` : '';
+    return `Cronograma${type}${p ? `_${p.code}` : ''}_${year}`;
   }
 
   // ------------------------------------------------------------------ PDF
