@@ -123,6 +123,13 @@ export class PlansController {
     return this.svc.matrix(ctx, year, f, view);
   }
 
+  @Get('plans/:year/coverage')
+  @Perms('plans.read')
+  @ApiZQuery(z.object({ scheduleType: z.enum(['PREVENTIVO', 'CORRECTIVO']).optional() }))
+  coverage(@Param('year', ParseIntPipe) year: number, @ZQuery(z.object({ scheduleType: z.enum(['PREVENTIVO', 'CORRECTIVO']).optional() })) q: { scheduleType?: 'PREVENTIVO' | 'CORRECTIVO' }) {
+    return this.svc.coverage(year, q.scheduleType ?? null);
+  }
+
   @Get('plans/:year/summary')
   @Perms('plans.read')
   @ApiZQuery(Filters)

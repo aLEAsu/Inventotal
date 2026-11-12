@@ -196,11 +196,15 @@ export class PlansService {
           expiredBeforeYear: number;
           noEligibleAssets: number;
           eligiblePrograms: number;
+          /** Programas que quedaron fuera, con el motivo, para orientar al usuario */
+          excludedPrograms: { code: string; name: string; reason: 'INACTIVO' | 'INICIA_DESPUES' | 'VENCIDO' | 'SIN_EQUIPOS'; year?: number }[];
+          /** Año más cercano en el que sí hay programas por iniciar */
+          suggestedYear: number | null;
         } | null = null;
         if (!evaluatedPrograms.length) {
           const allPrograms = await tx.maintenanceProgram.findMany({
             where: scheduleKindWhere(scheduleType),
-            select: { id: true, isActive: true, startDate: true, endDate: true, targetType: true, asset: { select: { status: true } } },
+            select: { id: true, code: true, name: true, isActive: true, startDate: true, endDate: true, targetType: true, asset: { select: { status: true } } },
           });
           eligibilityDiagnostics = {
             totalPrograms: allPrograms.length,
@@ -210,15 +214,28 @@ export class PlansService {
             expiredBeforeYear: 0,
             noEligibleAssets: 0,
             eligiblePrograms: 0,
+            excludedPrograms: [],
+            suggestedYear: null,
           };
+          const d = eligibilityDiagnostics;
           for (const p of allPrograms) {
-            if (!p.isActive) eligibilityDiagnostics.inactivePrograms++;
-            else if (p.startDate > yEnd) eligibilityDiagnostics.startsAfterYear++;
-            else if (p.endDate && p.endDate < yStart) eligibilityDiagnostics.expiredBeforeYear++;
-            else if (!assetsByProgram.get(p.id)?.length) {
-              if (p.targetType === 'ACTIVO' && p.asset && INACTIVE_STATUSES.includes(p.asset.status)) eligibilityDiagnostics.inactiveAssets++;
-              else eligibilityDiagnostics.noEligibleAssets++;
-            } else eligibilityDiagnostics.eligiblePrograms++;
+            const info = { code: p.code, name: p.name };
+            if (!p.isActive) {
+              d.inactivePrograms++;
+              d.excludedPrograms.push({ ...info, reason: 'INACTIVO' });
+            } else if (p.startDate > yEnd) {
+              d.startsAfterYear++;
+              const startYear = p.startDate.getUTCFullYear();
+              d.excludedPrograms.push({ ...info, reason: 'INICIA_DESPUES', year: startYear });
+              d.suggestedYear = d.suggestedYear === null ? startYear : Math.min(d.suggestedYear, startYear);
+            } else if (p.endDate && p.endDate < yStart) {
+              d.expiredBeforeYear++;
+              d.excludedPrograms.push({ ...info, reason: 'VENCIDO', year: p.endDate.getUTCFullYear() });
+            } else if (!assetsByProgram.get(p.id)?.length) {
+              if (p.targetType === 'ACTIVO' && p.asset && INACTIVE_STATUSES.includes(p.asset.status)) d.inactiveAssets++;
+              else d.noEligibleAssets++;
+              d.excludedPrograms.push({ ...info, reason: 'SIN_EQUIPOS' });
+            } else d.eligiblePrograms++;
           }
         }
         // Solo se comparan las actividades del cronograma que se está generando (preventivo / correctivo)
@@ -628,6 +645,34 @@ export class PlansService {
       executed: result.reduce((s, r) => s + r.executed, 0),
       monthTotals,
       rows: result,
+    };
+  }
+
+  /**
+   * Cobertura del plan maestro para un año y cronograma: cuántos programas vigentes aplican al año,
+   * cuántas actividades hay generadas y en qué años empiezan o terminaron los demás programas.
+   * Permite explicar en pantalla por qué un cronograma está vacío.
+   */
+  async coverage(year: number, scheduleType: ScheduleType | null) {
+    this.validateYear(year);
+    const yStart = parseYmd(`${year}-01-01`);
+    const yEnd = parseYmd(`${year}-12-31`);
+    const programs = await this.prisma.maintenanceProgram.findMany({
+      where: { ...scheduleKindWhere(scheduleType), isActive: true },
+      select: { id: true, startDate: true, endDate: true },
+    });
+    const applicable = programs.filter((p) => p.startDate <= yEnd && (!p.endDate || p.endDate >= yStart));
+    const startYears = [...new Set(programs.filter((p) => p.startDate > yEnd).map((p) => p.startDate.getUTCFullYear()))].sort();
+    const endedYears = [...new Set(programs.filter((p) => p.endDate && p.endDate < yStart).map((p) => p.endDate!.getUTCFullYear()))].sort();
+    const plan = await this.prisma.annualPlan.findUnique({ where: { year }, select: { id: true, lastGeneratedAt: true } });
+    const activities = plan
+      ? await this.prisma.scheduledActivity.count({ where: { planId: plan.id, program: scheduleKindWhere(scheduleType), status: { not: 'NO_APLICA' } } })
+      : 0;
+    return {
+      year, scheduleType, planExists: !!plan, lastGeneratedAt: plan?.lastGeneratedAt ?? null,
+      activePrograms: programs.length, applicablePrograms: applicable.length, activities,
+      laterStartYears: startYears, endedBeforeYears: endedYears,
+      needsGeneration: applicable.length > 0 && activities === 0,
     };
   }
 

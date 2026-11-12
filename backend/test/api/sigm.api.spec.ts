@@ -356,6 +356,28 @@ describe('4-6. Programas preventivos y generación del cronograma', () => {
     expect(prev.body.rows.length).toBeLessThan(perAsset.body.rows.length);
     expect(prev.body.total).toBe(perAsset.body.total);
     expect((prev.body.monthTotals as { total: number }[]).reduce((s, m) => s + m.total, 0)).toBe(prev.body.total);
+
+    // La orden generada desde el cronograma correctivo es correctiva y queda ligada a la actividad
+    const act = (await c.coord.get(`/plans/${YEAR}/activities?scheduleType=CORRECTIVO&pageSize=10`)).body.items[0];
+    const wo = await c.coord.post(`/workorders/from-activity/${act.id}`, {});
+    expect(wo.status).toBe(201);
+    expect(wo.body).toMatchObject({ type: 'CORRECTIVA', activityId: act.id });
+  });
+
+  it('explica cuándo un cronograma está vacío porque los programas inician en otro año', async () => {
+    const next = YEAR + 1;
+    const p = await c.coord.post('/programs', {
+      assetId: ids.asset_UPS, kind: 'CORRECTIVO', name: 'Reemplazo programado del año siguiente', frequencyType: 'ANUAL',
+      startDate: `${next}-01-01`, baseDate: `${next}-03-15`, frequencyJustification: 'Programa que empieza el próximo año',
+    });
+    expect(p.status).toBe(201);
+    const cov = await c.coord.get(`/plans/${YEAR}/coverage?scheduleType=CORRECTIVO`);
+    expect(cov.status).toBe(200);
+    expect(cov.body.laterStartYears).toContain(next);
+    expect(cov.body.applicablePrograms).toBeGreaterThanOrEqual(1);
+    const covNext = await c.coord.get(`/plans/${next}/coverage?scheduleType=CORRECTIVO`);
+    expect(covNext.body).toMatchObject({ planExists: false, needsGeneration: true });
+    expect(covNext.body.applicablePrograms).toBeGreaterThanOrEqual(1);
   });
 });
 
