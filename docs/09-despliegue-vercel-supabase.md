@@ -27,7 +27,7 @@ Vercel → proyecto → **Settings → Environment Variables** (entorno *Product
 **`DATABASE_URL`**: Supabase → botón **Connect** → *Transaction pooler*:
 
 ```
-postgresql://postgres.njztosvsbwtkdihmhuep:[CONTRASEÑA]@aws-0-us-east-1.pooler.supabase.com:6543/postgres
+postgresql://postgres.njztosvsbwtkdihmhuep:[CONTRASEÑA]@aws-1-us-east-1.pooler.supabase.com:6543/postgres
 ```
 
 - Use el *pooler* (no la conexión directa `db.…supabase.co`): las funciones serverless abren muchas conexiones cortas.
@@ -47,7 +47,7 @@ Las migraciones viven en `backend/prisma/migrations` y la tabla `_prisma_migrati
 Para aplicar migraciones nuevas (use la **conexión de sesión**, puerto `5432`, no la de transacciones):
 
 ```bash
-cd backend && DATABASE_URL="postgresql://postgres.njztosvsbwtkdihmhuep:[CONTRASEÑA]@aws-0-us-east-1.pooler.supabase.com:5432/postgres" npx prisma migrate deploy
+cd backend && DATABASE_URL="postgresql://postgres.njztosvsbwtkdihmhuep:[CONTRASEÑA]@aws-1-us-east-1.pooler.supabase.com:5432/postgres" npx prisma migrate deploy
 ```
 
 La migración `20261112040000_security_hardening` activa RLS en todas las tablas y retira los permisos de los roles
@@ -61,7 +61,7 @@ Desde el equipo con el contenedor `sigm-dev-db`, el siguiente comando copia los 
 Es **idempotente** (`--on-conflict-do-nothing`): puede repetirse sin duplicar registros.
 
 ```bash
-docker exec sigm-dev-db sh -c 'pg_dump -U sigm -d sigm_clinica --data-only --inserts --on-conflict-do-nothing -T _prisma_migrations -T sessions -T login_attempts | psql "$0" -v ON_ERROR_STOP=1 -q' "postgresql://postgres.njztosvsbwtkdihmhuep:[CONTRASEÑA]@aws-0-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require"
+docker exec sigm-dev-db sh -c 'pg_dump -U sigm -d sigm_clinica --data-only --inserts --on-conflict-do-nothing -T _prisma_migrations -T sessions -T login_attempts | psql "$0" -v ON_ERROR_STOP=1 -q' "postgresql://postgres.njztosvsbwtkdihmhuep:[CONTRASEÑA]@aws-1-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require"
 ```
 
 ## 5. Límites de la plataforma
