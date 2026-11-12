@@ -53,6 +53,19 @@ describe('Motor de recurrencias del cronograma', () => {
     expect(occurrencesInYear(rule({ frequencyType: 'FECHAS_ESPECIFICAS', specificDates: ['02-29'] }), 2027)).toEqual(['2027-02-28']);
   });
 
+  it('semana del mes: meses seleccionados y ordinal ISO del día', () => {
+    expect(occurrencesInYear(rule({
+      frequencyType: 'SEMANA_DEL_MES', monthsOfYear: [3, 2], weekOfMonth: 2, dayOfWeek: 1,
+    }), 2026)).toEqual(['2026-02-09', '2026-03-09']);
+  });
+
+  it('semana del mes: última ocurrencia respeta el día de semana y la vigencia', () => {
+    expect(occurrencesInYear(rule({
+      frequencyType: 'SEMANA_DEL_MES', monthsOfYear: [2, 3], weekOfMonth: -1, dayOfWeek: 7,
+      startDate: '2028-02-01', baseDate: '2028-02-01', endDate: '2028-02-29',
+    }), 2028)).toEqual(['2028-02-27']);
+  });
+
   it('fecha de inicio a mitad de año: no genera fechas anteriores al inicio', () => {
     const d = occurrencesInYear(rule({ startDate: '2026-06-01', baseDate: '2026-06-15' }), 2026);
     expect(d[0]).toBe('2026-06-15');

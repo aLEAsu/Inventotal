@@ -23,7 +23,24 @@ export class LifecycleService {
     const today = todayBogota();
     const upcoming = await this.settings.get<number>('schedule.upcomingDays');
     const [programs, activities, workOrders, failures, documents, contracts, criticality, statusHistory] = await Promise.all([
-      this.prisma.maintenanceProgram.findMany({ where: { assetId }, include: { responsible: { select: { fullName: true } }, supplier: { select: { name: true } } }, orderBy: { code: 'asc' } }),
+      this.prisma.maintenanceProgram.findMany({
+        where: {
+          OR: [
+            { assetId },
+            { targetType: 'CATEGORIA', categoryId: asset.categoryId },
+            ...(asset.subcategoryId ? [{ targetType: 'SUBCATEGORIA' as const, subcategoryId: asset.subcategoryId }] : []),
+            { targetType: 'GRUPO', group: { assets: { some: { assetId } } } },
+          ],
+        },
+        include: {
+          category: { select: { name: true } },
+          subcategory: { select: { name: true } },
+          group: { select: { name: true } },
+          responsible: { select: { fullName: true } },
+          supplier: { select: { name: true } },
+        },
+        orderBy: { code: 'asc' },
+      }),
       this.prisma.scheduledActivity.findMany({
         where: { assetId },
         include: { plan: { select: { year: true, status: true } }, program: { select: { code: true, name: true } }, workOrder: { select: { id: true, code: true } }, responsible: { select: { fullName: true } } },
@@ -58,7 +75,13 @@ export class LifecycleService {
     const users = new Map((await this.prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, fullName: true } })).map((u) => [u.id, u.fullName]));
     return {
       asset,
-      programs: programs.map((p) => ({ ...p, frequencyLabel: describeRule(p), startDate: fmtYmd(p.startDate), baseDate: fmtYmd(p.baseDate), lastPerformedDate: p.lastPerformedDate ? fmtYmd(p.lastPerformedDate) : null })),
+      programs: programs.map((p) => ({
+        ...p,
+        targetName: p.targetType === 'ACTIVO' ? asset.name : p.targetType === 'CATEGORIA' ? p.category?.name
+          : p.targetType === 'SUBCATEGORIA' ? p.subcategory?.name : p.group?.name,
+        frequencyLabel: describeRule(p), startDate: fmtYmd(p.startDate), baseDate: fmtYmd(p.baseDate),
+        lastPerformedDate: p.lastPerformedDate ? fmtYmd(p.lastPerformedDate) : null,
+      })),
       activities: activities.map((a) => {
         const ds = displayStatus(a, today, upcoming);
         return {

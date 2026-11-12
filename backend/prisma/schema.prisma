@@ -113,6 +113,7 @@ model User {
   assetsResponsible   Asset[]              @relation("AssetResponsible")
   assetsCreated       Asset[]              @relation("AssetCreatedBy")
   programsResponsible MaintenanceProgram[] @relation("ProgramResponsible")
+  maintenanceGroupsCreated MaintenanceGroup[] @relation("MaintenanceGroupCreatedBy")
   activitiesResp      ScheduledActivity[]  @relation("ActivityResponsible")
   workOrdersAssigned  WorkOrder[]          @relation("WOAssigned")
   workOrdersCreated   WorkOrder[]          @relation("WOCreated")
@@ -226,6 +227,7 @@ model AssetSubcategory {
   isActive   Boolean       @default(true)
   category   AssetCategory @relation(fields: [categoryId], references: [id])
   assets     Asset[]
+  programs   MaintenanceProgram[]
 
   @@unique([categoryId, name])
   @@map("asset_subcategories")
@@ -298,6 +300,7 @@ model Asset {
 
   criticalityAssessments CriticalityAssessment[]
   programs               MaintenanceProgram[]
+  maintenanceGroupMembers MaintenanceGroupMember[]
   activities             ScheduledActivity[]
   workOrders             WorkOrder[]
   failures               FailureReport[]
@@ -458,6 +461,8 @@ model SupplierEvaluation {
 
 enum MaintenanceKind {
   PREVENTIVO
+  /// Mantenimiento correctivo planificado (reparaciones o reemplazos programados)
+  CORRECTIVO
   INSPECCION
   CALIBRACION
   VERIFICACION_METROLOGICA
@@ -477,6 +482,7 @@ enum FrequencyType {
   ANUAL
   PERSONALIZADO
   FECHAS_ESPECIFICAS
+  SEMANA_DEL_MES
 }
 
 enum IntervalUnit {
@@ -485,11 +491,56 @@ enum IntervalUnit {
   MESES
 }
 
+enum ProgramTargetType {
+  ACTIVO
+  CATEGORIA
+  SUBCATEGORIA
+  GRUPO
+}
+
+enum ProgramDisplayMode {
+  POR_ACTIVO
+  AGRUPADO
+}
+
+model MaintenanceGroup {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique
+  description String?
+  isActive    Boolean  @default(true)
+  createdById String   @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+
+  createdBy User                   @relation("MaintenanceGroupCreatedBy", fields: [createdById], references: [id])
+  assets    MaintenanceGroupMember[]
+  programs  MaintenanceProgram[]
+
+  @@index([isActive])
+  @@map("maintenance_groups")
+}
+
+model MaintenanceGroupMember {
+  groupId String @db.Uuid
+  assetId String @db.Uuid
+
+  group MaintenanceGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  asset Asset            @relation(fields: [assetId], references: [id])
+
+  @@id([groupId, assetId])
+  @@index([assetId])
+  @@map("maintenance_group_members")
+}
+
 model MaintenanceProgram {
   id                    String          @id @default(uuid()) @db.Uuid
   code                  String          @unique
-  assetId               String          @db.Uuid
-  categoryId            String          @db.Uuid
+  targetType            ProgramTargetType @default(ACTIVO)
+  displayMode           ProgramDisplayMode @default(POR_ACTIVO)
+  assetId               String?         @db.Uuid
+  categoryId            String?         @db.Uuid
+  subcategoryId         String?         @db.Uuid
+  groupId               String?         @db.Uuid
   kind                  MaintenanceKind @default(PREVENTIVO)
   name                  String
   description           String?
@@ -502,6 +553,12 @@ model MaintenanceProgram {
   intervalUnit          IntervalUnit?
   /// Para FECHAS_ESPECIFICAS: ["MM-DD", ...] repetidas cada año
   specificDates         String[]
+  /// Meses seleccionados para la regla SEMANA_DEL_MES (1-12)
+  monthsOfYear          Int[]           @default([])
+  /// Semana ordinal (1-4) o -1 para la última semana del mes
+  weekOfMonth           Int?
+  /// Día ISO de semana (1=lunes, 7=domingo)
+  dayOfWeek             Int?
   startDate             DateTime        @db.Date
   /// Fecha ancla desde la que se calculan las recurrencias
   baseDate              DateTime        @db.Date
@@ -521,13 +578,17 @@ model MaintenanceProgram {
   createdById           String          @db.Uuid
   updatedAt             DateTime        @updatedAt @db.Timestamptz(6)
 
-  asset       Asset               @relation(fields: [assetId], references: [id])
-  category    AssetCategory       @relation(fields: [categoryId], references: [id])
+  asset       Asset?              @relation(fields: [assetId], references: [id])
+  category    AssetCategory?      @relation(fields: [categoryId], references: [id])
+  subcategory AssetSubcategory?   @relation(fields: [subcategoryId], references: [id])
+  group       MaintenanceGroup?   @relation(fields: [groupId], references: [id])
   responsible User?               @relation("ProgramResponsible", fields: [responsibleId], references: [id])
   supplier    Supplier?           @relation(fields: [supplierId], references: [id])
   activities  ScheduledActivity[]
 
   @@index([assetId])
+  @@index([targetType, categoryId, subcategoryId])
+  @@index([groupId])
   @@index([isActive])
   @@map("maintenance_programs")
 }
@@ -644,7 +705,7 @@ model ScheduledActivity {
   reschedules Reschedule[]
   workOrder   WorkOrder?
 
-  @@unique([planId, programId, periodKey])
+  @@unique([planId, programId, assetId, periodKey])
   @@index([planId, committedDate])
   @@index([assetId])
   @@index([status])

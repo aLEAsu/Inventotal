@@ -47,12 +47,13 @@ export const ASSET_CONDITION: Record<string, string> = {
   FUNCIONA_NORMAL: 'Funciona normalmente', FUNCIONA_CON_LIMITACIONES: 'Funciona con limitaciones', NO_FUNCIONA: 'No funciona', RIESGO_SEGURIDAD: 'Representa un riesgo',
 };
 export const KIND: Record<string, string> = {
-  PREVENTIVO: 'Preventivo', INSPECCION: 'Inspección', CALIBRACION: 'Calibración', VERIFICACION_METROLOGICA: 'Verificación técnica',
+  PREVENTIVO: 'Preventivo', CORRECTIVO: 'Correctivo', INSPECCION: 'Inspección', CALIBRACION: 'Calibración', VERIFICACION_METROLOGICA: 'Verificación técnica',
   LIMPIEZA: 'Limpieza', PRUEBA_FUNCIONAL: 'Prueba funcional / verificación', OTRO: 'Otro',
 };
 export const FREQUENCY: Record<string, string> = {
   SEMANAL: 'Semanal', QUINCENAL: 'Quincenal (15 días)', MENSUAL: 'Mensual', BIMESTRAL: 'Bimestral', TRIMESTRAL: 'Trimestral',
   CUATRIMESTRAL: 'Cuatrimestral', SEMESTRAL: 'Semestral', ANUAL: 'Anual', PERSONALIZADO: 'Intervalo personalizado', FECHAS_ESPECIFICAS: 'Fechas específicas',
+  SEMANA_DEL_MES: 'Semana específica del mes',
 };
 export const DOC_TYPE: Record<string, string> = {
   MANUAL_TECNICO: 'Manual técnico', FICHA_TECNICA: 'Ficha técnica', CERTIFICADO: 'Certificado', INFORME_MANTENIMIENTO: 'Informe de mantenimiento',

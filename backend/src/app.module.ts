@@ -28,6 +28,7 @@ import { PlanExportService } from './modules/plans/plan-export.service';
 import { PlansController } from './modules/plans/plans.controller';
 import { PlansService } from './modules/plans/plans.service';
 import { ProceduresController } from './modules/procedures/procedures.controller';
+import { MaintenanceGroupsController } from './modules/programs/maintenance-groups.controller';
 import { ProgramsController } from './modules/programs/programs.controller';
 import { ReportsController } from './modules/reports/reports.controller';
 import { ReportsService } from './modules/reports/reports.service';
@@ -54,7 +55,7 @@ const isTest = process.env.NODE_ENV === 'test';
     ScheduleModule.forRoot(),
   ],
   controllers: [
-    HealthController, AuthController, UsersController, CatalogController, AssetsController, ProgramsController,
+    HealthController, AuthController, UsersController, CatalogController, AssetsController, ProgramsController, MaintenanceGroupsController,
     PlansController, WorkOrdersController, FailuresController, DocumentsController, SuppliersController,
     LifecycleController, DashboardController, AuditController, ProceduresController, ReportsController,
   ],

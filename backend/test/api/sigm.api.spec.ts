@@ -198,6 +198,51 @@ describe('4-6. Programas preventivos y generación del cronograma', () => {
     expect(prev.body.dates).toEqual([`${YEAR}-01-15`, `${YEAR}-04-15`, `${YEAR}-07-15`, `${YEAR}-10-15`]);
   });
 
+  it('crea un plan maestro para un grupo y expande el cronograma por activo', async () => {
+    const group = await c.coord.post('/maintenance-groups', {
+      name: 'Grupo de prueba del cronograma',
+      assetIds: [ids.asset_CMP, ids.asset_PER],
+    });
+    expect(group.status).toBe(201);
+    expect(group.body.assetCount).toBe(2);
+    ids.maintenanceGroup = group.body.id;
+    const program = await c.coord.post('/programs', {
+      targetType: 'GRUPO',
+      displayMode: 'AGRUPADO',
+      groupId: ids.maintenanceGroup,
+      name: 'Revisión anual del grupo',
+      frequencyType: 'ANUAL',
+      startDate: `${YEAR}-01-01`,
+      baseDate: `${YEAR}-11-15`,
+      frequencyJustification: 'Recomendación del fabricante y condiciones de uso',
+    });
+    expect(program.status).toBe(201);
+    ids.groupProgram = program.body.id;
+    const categoryProgram = await c.coord.post('/programs', {
+      targetType: 'CATEGORIA',
+      categoryId: (await prisma.asset.findUniqueOrThrow({ where: { id: ids.asset_CMP }, select: { categoryId: true } })).categoryId,
+      name: 'Preventivo futuro de categoría',
+      frequencyType: 'ANUAL',
+      startDate: `${YEAR + 1}-01-01`,
+      baseDate: `${YEAR + 1}-01-15`,
+      frequencyJustification: 'Recomendación del fabricante y condiciones de uso',
+    });
+    expect(categoryProgram.status).toBe(201);
+    ids.categoryProgram = categoryProgram.body.id;
+    expect((await c.coord.get('/maintenance-groups')).body.some((item: { id: string }) => item.id === ids.maintenanceGroup)).toBe(true);
+    const categoryId = (await prisma.asset.findUniqueOrThrow({ where: { id: ids.asset_CMP }, select: { categoryId: true } })).categoryId;
+    const byCategory = await c.coord.get(`/programs?categoryId=${categoryId}`);
+    expect(byCategory.body.items.some((item: { id: string }) => item.id === ids.groupProgram)).toBe(true);
+    expect(byCategory.body.items.find((item: { id: string }) => item.id === ids.groupProgram).assetCount).toBe(2);
+    expect(byCategory.body.items.find((item: { id: string }) => item.id === ids.categoryProgram).assetCount).toBeGreaterThan(0);
+    const byAsset = await c.coord.get(`/programs?assetId=${ids.asset_CMP}`);
+    expect(byAsset.body.items.some((item: { id: string }) => item.id === ids.groupProgram)).toBe(true);
+    const lifecycle = await c.coord.get(`/assets/${ids.asset_CMP}/lifecycle`);
+    expect(lifecycle.body.programs.find((item: { id: string }) => item.id === ids.groupProgram)).toMatchObject({
+      targetName: 'Grupo de prueba del cronograma',
+    });
+  });
+
   it('el año actual se obtiene del servidor en America/Bogota', async () => {
     const r = await c.coord.get('/plans/current-year');
     expect(r.body).toMatchObject({ year: YEAR, today: todayBogota(), timezone: 'America/Bogota' });
@@ -211,10 +256,16 @@ describe('4-6. Programas preventivos y generación del cronograma', () => {
   it('genera el cronograma de forma transaccional con resumen por categoría y mes', async () => {
     const r = await c.coord.post(`/plans/${YEAR}/generate`, {});
     expect(r.status).toBe(201);
-    // mensual 12 + trimestral 4 + semestral 2 + anual 1 + fechas 2 + cada 10 semanas (≥5)
-    expect(r.body.created).toBeGreaterThanOrEqual(26);
+    // Los programas de grupo también crean una actividad individual por activo miembro.
+    expect(r.body.created).toBeGreaterThanOrEqual(28);
     expect(r.body.byMonth.reduce((s: number, x: number) => s + x, 0)).toBe(r.body.created);
     expect(Object.keys(r.body.byCategory).length).toBe(6);
+    const matrix = await c.coord.get(`/plans/${YEAR}/matrix`);
+    const row = matrix.body.rows.find((item: { programId: string }) => item.programId === ids.groupProgram);
+    expect(row).toMatchObject({ grouped: true, targetName: 'Grupo de prueba del cronograma' });
+    const groupCell = row.months[10].find((cell: { count?: number }) => cell.count);
+    expect(groupCell.count).toBe(2);
+    expect(groupCell.activities).toHaveLength(2);
     ids.generated = String(r.body.created);
   });
 
@@ -257,7 +308,7 @@ describe('4-6. Programas preventivos y generación del cronograma', () => {
   });
 
   it('vista matricial (12 meses) y detalle con filtros', async () => {
-    const m = await c.coord.get(`/plans/${YEAR}/matrix`);
+    const m = await c.coord.get(`/plans/${YEAR}/matrix?view=equipos`);
     expect(m.status).toBe(200);
     const row = (m.body.rows as { programId: string; months: unknown[][] }[]).find((r) => r.programId === ids.progMonthly)!;
     expect(row.months).toHaveLength(12);
@@ -267,18 +318,44 @@ describe('4-6. Programas preventivos y generación del cronograma', () => {
     const v = await c.coord.get(`/plans/${YEAR}/activities?status=VENCIDO&pageSize=500`);
     expect((v.body.items as { committedDate: string; displayStatus: string }[]).every((a) => a.committedDate < todayBogota() && a.displayStatus === 'VENCIDO')).toBe(true);
   });
+
+  it('cronograma correctivo: se genera por separado sin excluir el preventivo y la vista por grupos consolida filas', async () => {
+    const p = await c.coord.post('/programs', {
+      assetId: ids.asset_UPS, kind: 'CORRECTIVO', name: 'Cambio programado de baterías', frequencyType: 'ANUAL',
+      startDate: `${YEAR}-01-01`, baseDate: `${YEAR}-06-15`, frequencyJustification: 'Vida útil de baterías según el fabricante',
+    });
+    expect(p.status).toBe(201);
+    const active = () => prisma.scheduledActivity.count({ where: { plan: { year: YEAR }, status: { not: 'NO_APLICA' } } });
+    const before = await active();
+    const g = await c.coord.post(`/plans/${YEAR}/generate`, { scheduleType: 'CORRECTIVO' });
+    expect(g.status).toBe(201);
+    expect(g.body).toMatchObject({ scheduleType: 'CORRECTIVO', created: 1, excluded: 0, programsEvaluated: 1 });
+    expect(await active()).toBe(before + 1);
+
+    const corr = await c.coord.get(`/plans/${YEAR}/matrix?scheduleType=CORRECTIVO`);
+    expect(corr.body.rows).toHaveLength(1);
+    expect(corr.body.rows[0]).toMatchObject({ kind: 'CORRECTIVO', grouped: true, total: 1 });
+    const prev = await c.coord.get(`/plans/${YEAR}/matrix?scheduleType=PREVENTIVO`);
+    const perAsset = await c.coord.get(`/plans/${YEAR}/matrix?scheduleType=PREVENTIVO&view=equipos`);
+    expect((prev.body.rows as { kind: string }[]).every((r) => r.kind !== 'CORRECTIVO')).toBe(true);
+    expect(prev.body.rows.length).toBeLessThan(perAsset.body.rows.length);
+    expect(prev.body.total).toBe(perAsset.body.total);
+    expect((prev.body.monthTotals as { total: number }[]).reduce((s, m) => s + m.total, 0)).toBe(prev.body.total);
+  });
 });
 
 // --------------------------------------------------------------------------- 7–9. Exportaciones
 describe('7-9. Impresión, PDF y Excel del cronograma', () => {
-  it('8. descarga un PDF real con encabezado institucional y varias páginas', async () => {
+  it('8. descarga el cronograma por grupos en una sola hoja y, con anexo, el detalle por equipo', async () => {
     const r = await c.coord.get(`/plans/${YEAR}/export.pdf`).buffer(true).parse(binaryParser as never);
     expect(r.status).toBe(200);
     expect(r.headers['content-type']).toBe('application/pdf');
     const buf = r.body as Buffer;
     expect(buf.subarray(0, 5).toString()).toBe('%PDF-');
-    const pages = (buf.toString('latin1').match(/\/Type \/Page[^s]/g) ?? []).length;
-    expect(pages).toBeGreaterThanOrEqual(2);
+    const countPages = (b: Buffer) => (b.toString('latin1').match(/\/Type \/Page[^s]/g) ?? []).length;
+    expect(countPages(buf)).toBe(1);
+    const withAnnex = await c.coord.get(`/plans/${YEAR}/export.pdf?annex=1`).buffer(true).parse(binaryParser as never);
+    expect(countPages(withAnnex.body as Buffer)).toBeGreaterThanOrEqual(2);
     const a3 = await c.coord.get(`/plans/${YEAR}/export.pdf?paper=a3&month=3`).buffer(true).parse(binaryParser as never);
     expect(a3.status).toBe(200);
   });
@@ -288,7 +365,7 @@ describe('7-9. Impresión, PDF y Excel del cronograma', () => {
     await c.coord.post('/programs', { assetId: asset, name: 'Inspección semanal extensa', frequencyType: 'PERSONALIZADO', intervalValue: 1, intervalUnit: 'DIAS', startDate: `${YEAR}-01-01`, baseDate: `${YEAR}-01-01`, frequencyJustification: 'Prueba de volumen del reporte' });
     const g = await c.coord.post(`/plans/${YEAR}/generate`, {});
     expect(g.body.created).toBeGreaterThanOrEqual(365);
-    const r = await c.coord.get(`/plans/${YEAR}/export.pdf`).buffer(true).parse(binaryParser as never);
+    const r = await c.coord.get(`/plans/${YEAR}/export.pdf?annex=1`).buffer(true).parse(binaryParser as never);
     expect(r.status).toBe(200);
     const pages = ((r.body as Buffer).toString('latin1').match(/\/Type \/Page[^s]/g) ?? []).length;
     expect(pages).toBeGreaterThan(8);
@@ -573,6 +650,25 @@ describe('14. Hoja de vida, 16. indicadores y 17. años anteriores', () => {
     expect(prev.body.items.every((a: { committedDate: string }) => a.committedDate.startsWith(String(YEAR - 1)))).toBe(true);
     const list = await c.coord.get('/plans');
     expect(list.body.map((p: { year: number }) => p.year)).toEqual([YEAR + 1, YEAR, YEAR - 1]);
+  });
+
+  it('explica por qué no hay programas elegibles al generar un plan vacío', async () => {
+    const year = 2099;
+    const programs = await prisma.maintenanceProgram.findMany({ select: { id: true, isActive: true } });
+    await prisma.maintenanceProgram.updateMany({ data: { isActive: false } });
+    try {
+      expect((await c.coord.post(`/plans/${year}`, {})).status).toBe(201);
+      const generated = await c.coord.post(`/plans/${year}/generate`, {});
+      expect(generated.status).toBe(201);
+      expect(generated.body.programsEvaluated).toBe(0);
+      expect(generated.body.eligibilityDiagnostics).toMatchObject({
+        totalPrograms: programs.length,
+        inactivePrograms: programs.length,
+        eligiblePrograms: 0,
+      });
+    } finally {
+      await Promise.all(programs.map((p) => prisma.maintenanceProgram.update({ where: { id: p.id }, data: { isActive: p.isActive } })));
+    }
   });
 
   it('cierra el plan y lo protege contra modificaciones', async () => {

@@ -2,7 +2,7 @@ import { addDays, addMonthsClamped, daysBetween, daysInMonth } from '../../commo
 
 export type FrequencyType =
   | 'SEMANAL' | 'QUINCENAL' | 'MENSUAL' | 'BIMESTRAL' | 'TRIMESTRAL' | 'CUATRIMESTRAL'
-  | 'SEMESTRAL' | 'ANUAL' | 'PERSONALIZADO' | 'FECHAS_ESPECIFICAS';
+  | 'SEMESTRAL' | 'ANUAL' | 'PERSONALIZADO' | 'FECHAS_ESPECIFICAS' | 'SEMANA_DEL_MES';
 export type IntervalUnit = 'DIAS' | 'SEMANAS' | 'MESES';
 
 export interface RecurrenceRule {
@@ -11,6 +11,9 @@ export interface RecurrenceRule {
   intervalUnit?: IntervalUnit | null;
   /** ["MM-DD", ...] para FECHAS_ESPECIFICAS */
   specificDates?: string[] | null;
+  monthsOfYear?: number[] | null;
+  weekOfMonth?: number | null;
+  dayOfWeek?: number | null;
   /** 'YYYY-MM-DD' inicio de vigencia del programa */
   startDate: string;
   /** 'YYYY-MM-DD' ancla de cálculo de recurrencias */
@@ -57,6 +60,18 @@ export function validateRule(r: RecurrenceRule): string[] {
       }
     }
   }
+  if (r.frequencyType === 'SEMANA_DEL_MES') {
+    const months = r.monthsOfYear ?? [];
+    if (!months.length || months.some((m) => !Number.isInteger(m) || m < 1 || m > 12) || new Set(months).size !== months.length) {
+      errs.push('Seleccione meses válidos y sin duplicados');
+    }
+    if (r.weekOfMonth !== -1 && (!Number.isInteger(r.weekOfMonth) || (r.weekOfMonth ?? 0) < 1 || (r.weekOfMonth ?? 0) > 4)) {
+      errs.push('Seleccione una semana del mes entre la 1.ª y la 4.ª, o la última');
+    }
+    if (!Number.isInteger(r.dayOfWeek) || (r.dayOfWeek ?? 0) < 1 || (r.dayOfWeek ?? 0) > 7) {
+      errs.push('Seleccione un día de la semana válido');
+    }
+  }
   return errs;
 }
 
@@ -77,6 +92,24 @@ export function occurrencesInYear(r: RecurrenceRule, year: number): string[] {
   if (from > to) return [];
 
   const out = new Set<string>();
+  if (r.frequencyType === 'SEMANA_DEL_MES') {
+    for (const month of r.monthsOfYear ?? []) {
+      const firstDay = new Date(Date.UTC(year, month - 1, 1)).getUTCDay();
+      const isoFirstDay = firstDay === 0 ? 7 : firstDay;
+      let day: number;
+      if (r.weekOfMonth === -1) {
+        const lastDay = daysInMonth(year, month);
+        const lastWeekday = new Date(Date.UTC(year, month - 1, lastDay)).getUTCDay();
+        const isoLastWeekday = lastWeekday === 0 ? 7 : lastWeekday;
+        day = lastDay - ((isoLastWeekday - r.dayOfWeek! + 7) % 7);
+      } else {
+        day = 1 + ((r.dayOfWeek! - isoFirstDay + 7) % 7) + 7 * ((r.weekOfMonth ?? 1) - 1);
+      }
+      const date = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      if (date >= from && date <= to) out.add(date);
+    }
+    return [...out].sort();
+  }
   if (r.frequencyType === 'FECHAS_ESPECIFICAS') {
     for (const md of r.specificDates ?? []) {
       const mm = Number(md.slice(0, 2));
@@ -113,10 +146,16 @@ export function occurrencesInYear(r: RecurrenceRule, year: number): string[] {
 export const FREQUENCY_LABELS: Record<FrequencyType, string> = {
   SEMANAL: 'Semanal', QUINCENAL: 'Quincenal (15 días)', MENSUAL: 'Mensual', BIMESTRAL: 'Bimestral',
   TRIMESTRAL: 'Trimestral', CUATRIMESTRAL: 'Cuatrimestral', SEMESTRAL: 'Semestral', ANUAL: 'Anual',
-  PERSONALIZADO: 'Intervalo personalizado', FECHAS_ESPECIFICAS: 'Fechas específicas',
+  PERSONALIZADO: 'Intervalo personalizado', FECHAS_ESPECIFICAS: 'Fechas específicas', SEMANA_DEL_MES: 'Semana específica del mes',
 };
 
-export function describeRule(r: Pick<RecurrenceRule, 'frequencyType' | 'intervalValue' | 'intervalUnit' | 'specificDates'>): string {
+export function describeRule(r: Pick<RecurrenceRule, 'frequencyType' | 'intervalValue' | 'intervalUnit' | 'specificDates' | 'monthsOfYear' | 'weekOfMonth' | 'dayOfWeek'>): string {
+  if (r.frequencyType === 'SEMANA_DEL_MES') {
+    const months = (r.monthsOfYear ?? []).map((m) => ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'][m - 1]).join(', ');
+    const week = r.weekOfMonth === -1 ? 'última' : `${r.weekOfMonth}.ª`;
+    const weekday = ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo'][(r.dayOfWeek ?? 1) - 1];
+    return `${months} · ${week} semana, ${weekday}`;
+  }
   if (r.frequencyType === 'PERSONALIZADO') {
     const u = { DIAS: 'día(s)', SEMANAS: 'semana(s)', MESES: 'mes(es)' }[r.intervalUnit ?? 'DIAS'];
     return `Cada ${r.intervalValue} ${u}`;

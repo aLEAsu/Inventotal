@@ -5,7 +5,7 @@ import { fmtDateTimeBogota, fmtDMY, MONTHS_ES, MONTHS_ES_SHORT } from '../../com
 import { InstitutionalPdf } from '../../common/pdf';
 import { PrismaService } from '../../common/prisma.service';
 import { SettingsService } from '../../common/settings.service';
-import { ActivityFilters, DISPLAY_STATUS_LABELS, DisplayStatus, PlansService } from './plans.service';
+import { ActivityFilters, DISPLAY_STATUS_LABELS, DisplayStatus, MatrixView, PlansService, SCHEDULE_TYPE_LABEL } from './plans.service';
 
 export const STATUS_SYMBOL: Record<DisplayStatus, string> = {
   PROGRAMADO: 'P', PROXIMO: 'X', EN_EJECUCION: 'E', EJECUTADO: '✓', VENCIDO: 'V', REPROGRAMADO: 'R', CANCELADO: 'C', NO_APLICA: 'NA',
@@ -16,6 +16,11 @@ const STATUS_RGB: Record<DisplayStatus, [number, number, number]> = {
   PROGRAMADO: [219, 234, 254], PROXIMO: [254, 243, 199], EN_EJECUCION: [224, 231, 255], EJECUTADO: [209, 250, 229],
   VENCIDO: [254, 202, 202], REPROGRAMADO: [237, 233, 254], CANCELADO: [229, 231, 235], NO_APLICA: [243, 244, 246],
 };
+type MatrixCellLike = { day: number; status: DisplayStatus; count: number; executed: number; rescheduled: boolean };
+/** Texto de una celda: día del mes; en filas agrupadas, equipos ejecutados / equipos programados. */
+const cellText = (x: MatrixCellLike, grouped: boolean, symbols: Record<DisplayStatus, string> = PDF_SYMBOL) =>
+  grouped ? `${x.day} · ${x.executed ? `${x.executed}/${x.count}` : x.count}${x.rescheduled ? ' R' : ''}` : `${x.day}${symbols[x.status]}`;
+const monthStatus = (cell: MatrixCellLike[]) => (cell.length ? cell[cell.length - 1].status : null);
 const PLAN_STATUS_LABEL: Record<string, string> = { BORRADOR: 'Borrador', EN_REVISION: 'En revisión', APROBADO: 'Aprobado', CERRADO: 'Cerrado' };
 
 const hex = (rgb: [number, number, number]) => 'FF' + rgb.map((c) => c.toString(16).padStart(2, '0')).join('').toUpperCase();
@@ -28,9 +33,9 @@ export class PlanExportService {
     private readonly prisma: PrismaService,
   ) {}
 
-  private async context(ctx: ReqCtx, year: number, f: ActivityFilters) {
+  private async context(ctx: ReqCtx, year: number, f: ActivityFilters, view: MatrixView = 'grupos', withDetail = true) {
     const [matrix, summary, plan, institution, nit, color, format] = await Promise.all([
-      this.plans.matrix(ctx, year, f),
+      this.plans.matrix(ctx, year, f, view),
       this.plans.summary(ctx, year, f),
       this.plans.getPlan(year),
       this.settings.get<string>('institution.name'),
@@ -38,8 +43,8 @@ export class PlanExportService {
       this.settings.get<string>('institution.primaryColor'),
       this.prisma.documentFormat.findUnique({ where: { code: 'F-02' } }),
     ]);
-    const detail = await this.plans.allActivities(ctx, year, f);
-    return { matrix, summary, plan: plan!, institution, nit, color, format, detail: detail.items };
+    const detail = withDetail ? (await this.plans.allActivities(ctx, year, f)).items : [];
+    return { matrix, summary, plan: plan!, institution, nit, color, format, detail };
   }
 
   async filtersText(f: ActivityFilters) {
@@ -53,19 +58,26 @@ export class PlanExportService {
     if (f.status) parts.push(`Estado: ${DISPLAY_STATUS_LABELS[f.status]}`);
     if (f.kind) parts.push(`Tipo: ${f.kind}`);
     if (f.q) parts.push(`Búsqueda: "${f.q}"`);
+    // el tipo de cronograma va en el título, no en los filtros
     return parts.join(' · ');
   }
 
   // ------------------------------------------------------------------ PDF
-  async pdf(ctx: ReqCtx, year: number, f: ActivityFilters, paper: 'a4' | 'a3' = 'a4'): Promise<Buffer> {
-    const c = await this.context(ctx, year, f);
+  /**
+   * Cronograma en una sola hoja: encabezado institucional, control documental, matriz anual por grupos
+   * (o por equipo), totales mensuales, leyenda y firmas. La fuente se ajusta para que la matriz quepa en la página.
+   * Con annex = true se agrega, en hojas siguientes, el detalle de actividades por equipo.
+   */
+  async pdf(ctx: ReqCtx, year: number, f: ActivityFilters, paper: 'a4' | 'a3' = 'a4', view: MatrixView = 'grupos', annex = false): Promise<Buffer> {
+    const c = await this.context(ctx, year, f, view, annex);
     const filters = await this.filtersText(f);
+    const grouped = view === 'grupos';
     const pdf = new InstitutionalPdf(
       {
         institution: c.institution,
         institutionNit: c.nit,
-        title: c.plan.title || 'PLAN ANUAL DE MANTENIMIENTO',
-        subtitle: `Año ${year} · Estado: ${PLAN_STATUS_LABEL[c.plan.status]}${filters ? ` · Filtros: ${filters}` : ''}`,
+        title: scheduleTitle(f, c.plan.title),
+        subtitle: `Año ${year} · Estado: ${PLAN_STATUS_LABEL[c.plan.status]} · ${grouped ? 'Vista por grupos' : 'Vista por equipo'}${filters ? ` · ${filters}` : ''}`,
         documentCode: c.plan.documentCode,
         version: String(c.plan.version),
         effectiveDate: c.format ? fmtDMY(c.format.effectiveDate) : undefined,
@@ -74,115 +86,143 @@ export class PlanExportService {
       },
       { orientation: 'landscape', format: paper },
     );
+    const isA3 = paper === 'a3';
 
-    // Control documental
     pdf.keyValues(
       [
-        ['Año', year],
-        ['Versión', c.plan.version],
-        ['Estado documental', PLAN_STATUS_LABEL[c.plan.status]],
-        ['Fecha de generación', fmtDateTimeBogota(new Date())],
         ['Elaboró', c.plan.createdBy ?? '—'],
         ['Revisó', c.plan.reviewedBy ?? '—'],
-        ['Aprobó', c.plan.approvedBy ? `${c.plan.approvedBy} (${fmtDateTimeBogota(c.plan.approvedAt)})` : 'Pendiente de aprobación'],
-        ['Total de actividades', c.summary.total],
+        ['Aprobó', c.plan.approvedBy ? `${c.plan.approvedBy} (${fmtDMY(c.plan.approvedAt)})` : 'Pendiente de aprobación'],
+        [grouped ? 'Grupos / equipos' : 'Equipos', grouped ? `${c.matrix.rows.length} / ${c.matrix.assetCount}` : c.matrix.assetCount],
+        ['Actividades', c.matrix.total],
+        ['Ejecutadas', `${c.matrix.executed}${c.matrix.total ? ` (${((c.matrix.executed / c.matrix.total) * 100).toFixed(0)} %)` : ''}`],
       ],
-      4,
+      3,
     );
+    pdf.section(grouped ? 'Cronograma anual por grupos de mantenimiento' : 'Cronograma anual por equipo');
 
-    // Matriz anual
-    pdf.section('Cronograma anual (vista matricial)');
-    const isA3 = paper === 'a3';
-    const body = c.matrix.rows.map((r) => [
-      r.assetCode,
-      `${r.assetName}\n${r.programName}`,
-      r.areaName,
+    // --- Matriz
+    const head = grouped
+      ? ['Grupo', 'Actividad', 'Equipos', 'Periodicidad', 'Responsable', ...MONTHS_ES_SHORT, 'Total']
+      : ['Equipo', 'Grupo / actividad', 'Área', 'Periodicidad', 'Responsable', ...MONTHS_ES_SHORT, 'Total'];
+    const body: (string | number)[][] = c.matrix.rows.map((r) => [
+      grouped ? r.targetName : `${r.assetCode} · ${r.assetName}`,
+      grouped ? r.programName : `${r.targetName} · ${r.programName}`,
+      grouped ? r.assetCount : r.areaName,
       r.frequency,
       r.responsible ?? '—',
-      ...r.months.map((cell) => cell.map((x) => `${x.day}${PDF_SYMBOL[x.status]}`).join(' ')),
+      ...r.months.map((cell) => cell.map((x) => cellText(x, grouped)).join('\n')),
+      r.total,
     ]);
-    const monthCellStatus = c.matrix.rows.map((r) => r.months.map((cell) => (cell.length ? cell[cell.length - 1].status : null)));
+    const hasRows = body.length > 0;
+    if (hasRows) body.push(['TOTAL', '', grouped ? c.matrix.assetCount : '', '', '', ...c.matrix.monthTotals.map((m) => m.total || ''), c.matrix.total]);
+    else body.push(['Sin actividades para los filtros seleccionados. Genere el cronograma desde el sistema.', '', '', '', '', ...Array(12).fill(''), '']);
+    const cellStatus = c.matrix.rows.map((r) => r.months.map(monthStatus));
+
+    const widths = isA3 ? [60, 68, 16, 40, 32] : [40, 46, 13, 28, 21];
+    const totalW = isA3 ? 14 : 11;
+    const monthW = (pdf.width - 2 * pdf.margin - widths.reduce((s, w) => s + w, 0) - totalW) / 12;
+    const colWidths = [...widths, ...Array(12).fill(monthW), totalW];
+
+    // Espacio disponible para que matriz, leyenda y firmas quepan en la primera hoja
+    const reservedBelow = 16 + 9 + 24; // pie + leyenda + firmas
+    const available = pdf.height - pdf.y - 4 - reservedBelow;
+    const padding = 0.8;
+    const estimate = (fs: number) => {
+      pdf.doc.setFontSize(fs);
+      const lineH = fs * 0.3528 * 1.15;
+      const rowsH = body.map((row) => Math.max(...row.map((v, i) => pdf.doc.splitTextToSize(String(v), colWidths[i] - 2 * padding).length)) * lineH + 2 * padding);
+      return rowsH.reduce((s, h) => s + h, 0) + 2 * lineH + 2 * padding; // + encabezado (2 líneas)
+    };
+    let fontSize = isA3 ? 8.5 : 7.5;
+    while (fontSize > 4.6 && estimate(fontSize) > available) fontSize -= 0.25;
+
     pdf.table({
-      head: [['Código', 'Activo / Mantenimiento', 'Área', 'Periodicidad', 'Responsable', ...MONTHS_ES_SHORT]],
-      body: body.length ? body : [['', 'Sin actividades para los filtros seleccionados', '', '', '', ...Array(12).fill('')]],
-      styles: { fontSize: isA3 ? 7.5 : 6.3, cellPadding: 1, overflow: 'linebreak', valign: 'middle' },
+      head: [head],
+      body,
+      styles: { fontSize, cellPadding: padding, overflow: 'linebreak', valign: 'middle' },
+      headStyles: { fontSize: Math.max(fontSize, 5.5) },
       columnStyles: {
-        0: { cellWidth: isA3 ? 28 : 23, fontSize: isA3 ? 7 : 5.8 },
-        1: { cellWidth: isA3 ? 80 : 56 },
-        2: { cellWidth: isA3 ? 30 : 21 },
-        3: { cellWidth: isA3 ? 24 : 17 },
-        4: { cellWidth: isA3 ? 30 : 20 },
-        ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [i + 5, { halign: 'center' as const }])),
+        ...Object.fromEntries(colWidths.map((w, i) => [i, { cellWidth: w }])),
+        0: { cellWidth: colWidths[0], fontStyle: 'bold' },
+        2: { cellWidth: colWidths[2], halign: 'center' },
+        ...Object.fromEntries(Array.from({ length: 13 }, (_, i) => [i + 5, { cellWidth: colWidths[i + 5], halign: 'center' as const }])),
       },
       didParseCell: (d) => {
-        if (d.section === 'body' && d.column.index >= 5 && body.length) {
-          const st = monthCellStatus[d.row.index]?.[d.column.index - 5];
+        if (d.section !== 'body') return;
+        const isTotal = hasRows && d.row.index === body.length - 1;
+        if (isTotal) {
+          d.cell.styles.fontStyle = 'bold';
+          d.cell.styles.fillColor = [226, 232, 240];
+          return;
+        }
+        if (d.column.index >= 5 && d.column.index < 17 && hasRows) {
+          const st = cellStatus[d.row.index]?.[d.column.index - 5];
           if (st) d.cell.styles.fillColor = STATUS_RGB[st];
         }
+        if (d.column.index === 17) d.cell.styles.fontStyle = 'bold';
       },
     });
 
-    // Leyenda
-    pdf.section('Leyenda de estados');
-    pdf.table({
-      body: [Object.entries(PDF_SYMBOL).map(([k, s]) => `${s} = ${DISPLAY_STATUS_LABELS[k as DisplayStatus]}`)],
-      styles: { fontSize: 7, halign: 'center' },
-      didParseCell: (d) => {
-        const k = Object.keys(PDF_SYMBOL)[d.column.index] as DisplayStatus;
-        if (k) d.cell.styles.fillColor = STATUS_RGB[k];
-      },
-    });
-    pdf.paragraph('El número indica el día del mes de la fecha comprometida. "R" señala fechas reprogramadas y aprobadas; la fecha originalmente aprobada se conserva en el detalle.', 7);
+    // --- Leyenda compacta
+    const legend = (Object.keys(STATUS_RGB) as DisplayStatus[]).filter((k) => k !== 'NO_APLICA');
+    const doc = pdf.doc;
+    let lx = pdf.margin;
+    const ly = Math.min(pdf.y + 5, pdf.height - 16 - 24 - 2);
+    doc.setFontSize(6.5);
+    doc.setFont('helvetica', 'bold');
+    doc.text('Estados:', lx, ly);
+    lx += 12;
+    doc.setFont('helvetica', 'normal');
+    for (const k of legend) {
+      const label = grouped ? DISPLAY_STATUS_LABELS[k] : `${PDF_SYMBOL[k]} ${DISPLAY_STATUS_LABELS[k]}`;
+      const w = doc.getTextWidth(label) + 4;
+      doc.setFillColor(...STATUS_RGB[k]);
+      doc.rect(lx, ly - 2.6, w, 3.6, 'F');
+      doc.text(label, lx + 2, ly);
+      lx += w + 1.5;
+    }
+    doc.setTextColor(80);
+    doc.text(grouped
+      ? 'Celda: día del mes · equipos (ejecutados/programados). R = reprogramada. Color = estado más urgente del grupo.'
+      : 'Celda: día del mes y estado. Las fechas reprogramadas conservan la fecha original en el sistema.', lx + 3, ly);
+    doc.setTextColor(20);
 
-    // Totales por categoría
-    pdf.section('Resumen por categoría');
-    const cats = Object.entries(c.summary.byCategory);
-    pdf.table({
-      head: [['Categoría', 'Total', 'Ejecutadas', 'Vencidas', 'Reprogramadas', 'Canceladas / No aplica', '% ejecución']],
-      body: [
-        ...cats.map(([name, v]) => [
-          name, v.total, v.executed, v.byStatus.VENCIDO ?? 0, v.byStatus.REPROGRAMADO ?? 0,
-          (v.byStatus.CANCELADO ?? 0) + (v.byStatus.NO_APLICA ?? 0), v.total ? `${((v.executed / v.total) * 100).toFixed(1)} %` : '—',
+    // --- Firmas compactas en la misma hoja
+    const sy = ly + 17;
+    const sw = (pdf.width - 2 * pdf.margin) / 3;
+    [['Elaboró', c.plan.createdBy], ['Revisó', c.plan.reviewedBy], ['Aprobó', c.plan.approvedBy]].forEach(([role, name], i) => {
+      const x = pdf.margin + i * sw;
+      doc.setDrawColor(60);
+      doc.line(x + 10, sy, x + sw - 10, sy);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.5);
+      doc.text(String(role), x + sw / 2, sy + 3.5, { align: 'center' });
+      doc.setFont('helvetica', 'normal');
+      if (name) doc.text(String(name), x + sw / 2, sy + 7, { align: 'center' });
+    });
+    pdf.setY(sy + 8);
+
+    // --- Anexo opcional: detalle por equipo
+    if (annex) {
+      pdf.addPage();
+      pdf.section('Anexo · Detalle de actividades por equipo');
+      pdf.table({
+        head: [['Fecha', 'Fecha original', 'Código', 'Equipo', 'Área', 'Mantenimiento', 'Responsable', 'Estado', 'Ejecución', 'OT']],
+        body: c.detail.map((a) => [
+          fmtDMY(a.committedDate), a.rescheduled ? fmtDMY(a.originalDate) : '=', a.asset.code, a.asset.name, a.asset.area.name,
+          a.program.name, a.responsible?.fullName ?? '—', a.displayStatusLabel, a.executedDate ? fmtDMY(a.executedDate) : '', a.workOrder?.code ?? '',
         ]),
-        ['TOTAL', c.summary.total, cats.reduce((s, [, v]) => s + v.executed, 0), c.summary.byStatus.VENCIDO ?? 0, c.summary.byStatus.REPROGRAMADO ?? 0,
-          (c.summary.byStatus.CANCELADO ?? 0) + (c.summary.byStatus.NO_APLICA ?? 0), ''],
-      ],
-      columnStyles: { 1: { halign: 'right' }, 2: { halign: 'right' }, 3: { halign: 'right' }, 4: { halign: 'right' }, 5: { halign: 'right' }, 6: { halign: 'right' } },
-      didParseCell: (d) => {
-        if (d.section === 'body' && d.row.index === cats.length) d.cell.styles.fontStyle = 'bold';
-      },
-    });
-    pdf.section('Actividades por mes');
-    pdf.table({
-      head: [MONTHS_ES_SHORT.concat('TOTAL')],
-      body: [c.summary.byMonth.map((m) => m.total).concat(c.summary.total)],
-      styles: { halign: 'center' },
-    });
-
-    // Detalle
-    pdf.addPage();
-    pdf.section('Detalle de actividades programadas');
-    pdf.table({
-      head: [['Fecha comprometida', 'Fecha original', 'Código', 'Activo', 'Área', 'Mantenimiento', 'Responsable', 'Estado', 'Ejecución', 'OT']],
-      body: c.detail.map((a) => [
-        fmtDMY(a.committedDate), a.rescheduled ? fmtDMY(a.originalDate) : '=', a.asset.code, a.asset.name, a.asset.area.name,
-        a.program.name, a.responsible?.fullName ?? '—', a.displayStatusLabel, a.executedDate ? fmtDMY(a.executedDate) : '', a.workOrder?.code ?? '',
-      ]),
-      styles: { fontSize: isA3 ? 7.5 : 6.8 },
-      columnStyles: { 0: { cellWidth: 20 }, 1: { cellWidth: 18 }, 2: { cellWidth: 24 }, 8: { cellWidth: 18 } },
-    });
-
-    pdf.signatures([
-      { role: 'Elaboró', name: c.plan.createdBy, detail: 'Coordinación de mantenimiento' },
-      { role: 'Revisó', name: c.plan.reviewedBy },
-      { role: 'Aprobó', name: c.plan.approvedBy },
-    ]);
+        styles: { fontSize: isA3 ? 7.5 : 6.8 },
+        columnStyles: { 0: { cellWidth: 18 }, 1: { cellWidth: 18 }, 2: { cellWidth: 24 }, 8: { cellWidth: 18 } },
+      });
+    }
     return pdf.finalize();
   }
 
   // ------------------------------------------------------------------ Excel
-  async xlsx(ctx: ReqCtx, year: number, f: ActivityFilters): Promise<Buffer> {
-    const c = await this.context(ctx, year, f);
+  async xlsx(ctx: ReqCtx, year: number, f: ActivityFilters, view: MatrixView = 'grupos'): Promise<Buffer> {
+    const c = await this.context(ctx, year, f, view);
     const filters = await this.filtersText(f);
     const wb = new ExcelJS.Workbook();
     wb.creator = 'SIGM';
@@ -202,7 +242,7 @@ export class PlanExportService {
       ws.getCell(1, 1).value = c.institution;
       ws.getCell(1, 1).font = { bold: true, size: 13, color: { argb: brand } };
       ws.mergeCells(2, 1, 2, cols);
-      ws.getCell(2, 1).value = `${c.plan.title || 'PLAN ANUAL DE MANTENIMIENTO'} ${year} — ${sub}`;
+      ws.getCell(2, 1).value = `${scheduleTitle(f, c.plan.title)} ${year} — ${sub}`;
       ws.getCell(2, 1).font = { bold: true, size: 12 };
       ws.mergeCells(3, 1, 3, cols);
       ws.getCell(3, 1).value = `Código: ${c.plan.documentCode} · Versión: ${c.plan.version} · Estado: ${PLAN_STATUS_LABEL[c.plan.status]} · Generado: ${fmtDateTimeBogota(new Date())} por ${ctx.user.fullName}${filters ? ` · Filtros: ${filters}` : ''}`;
@@ -246,27 +286,36 @@ export class PlanExportService {
     s1.columns.forEach((col, i) => (col.width = i === 0 ? 34 : 15));
 
     // Hoja 2: Cronograma mensual (matriz)
-    const s2 = wb.addWorksheet('Cronograma mensual', { views: [{ state: 'frozen', xSplit: 4, ySplit: 5 }], pageSetup: { orientation: 'landscape', paperSize: 8 as never, fitToPage: true, fitToWidth: 1, fitToHeight: 0 } });
-    titleBlock(s2, 'Cronograma mensual', 18);
+    // Una sola hoja impresa (ancho y alto ajustados a la página)
+    const s2 = wb.addWorksheet('Cronograma mensual', { views: [{ state: 'frozen', xSplit: 3, ySplit: 5 }], pageSetup: { orientation: 'landscape', paperSize: 9, fitToPage: true, fitToWidth: 1, fitToHeight: 1 } });
+    titleBlock(s2, view === 'grupos' ? 'Cronograma por grupos' : 'Cronograma por equipo', 19);
     s2.addRow([]);
-    const h2 = s2.addRow(['Código activo', 'Activo', 'Mantenimiento', 'Área', 'Categoría', 'Periodicidad', ...MONTHS_ES, 'Total']);
+    const grouped = view === 'grupos';
+    const h2 = s2.addRow(grouped
+      ? ['Grupo', 'Tipo de agrupación', 'Actividad', 'Equipos', 'Área', 'Periodicidad', ...MONTHS_ES, 'Total']
+      : ['Código activo', 'Activo', 'Grupo / mantenimiento', 'Área', 'Categoría', 'Periodicidad', ...MONTHS_ES, 'Total']);
     headStyle(h2);
     for (const r of c.matrix.rows) {
       const row = s2.addRow([
-        r.assetCode, r.assetName, r.programName, r.areaName, r.categoryName, r.frequency,
-        ...r.months.map((cell) => cell.map((x) => `${String(x.day).padStart(2, '0')} ${STATUS_SYMBOL[x.status]}`).join('\n')),
-        r.months.reduce((s, cell) => s + cell.length, 0),
+        ...(grouped
+          ? [r.targetName, r.groupType, r.programName, r.assetCount, r.areaName, r.frequency]
+          : [r.assetCode, r.assetName, `${r.targetName} · ${r.programName}`, r.areaName, r.categoryName, r.frequency]),
+        ...r.months.map((cell) => cell.map((x) => cellText(x, grouped, STATUS_SYMBOL)).join('\n')),
+        r.total,
       ]);
       r.months.forEach((cell, i) => {
         const xc = row.getCell(7 + i);
         xc.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-        if (cell.length) xc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: hex(STATUS_RGB[cell[cell.length - 1].status]) } };
+        const st = monthStatus(cell);
+        if (st) xc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: hex(STATUS_RGB[st]) } };
       });
     }
+    const totalRow = s2.addRow(['TOTAL', '', '', grouped ? c.matrix.assetCount : '', '', '', ...c.matrix.monthTotals.map((m) => m.total), c.matrix.total]);
+    totalRow.font = { bold: true };
     s2.autoFilter = { from: { row: h2.number, column: 1 }, to: { row: h2.number, column: 19 } };
     s2.columns.forEach((col, i) => (col.width = i < 6 ? [14, 30, 34, 20, 20, 16][i] : i === 18 ? 8 : 9));
     s2.addRow([]);
-    s2.addRow(['Leyenda: ' + Object.entries(STATUS_SYMBOL).map(([k, s]) => `${s} = ${DISPLAY_STATUS_LABELS[k as DisplayStatus]}`).join(' · ')]);
+    s2.addRow([(grouped ? 'Celdas: día · equipos (ejecutados/programados). Color = estado más urgente del grupo. ' : '') + 'Leyenda: ' + Object.entries(STATUS_SYMBOL).map(([k, s]) => `${s} = ${DISPLAY_STATUS_LABELS[k as DisplayStatus]}`).join(' · ')]);
 
     // Hoja 3: Detalle de actividades
     const s3 = wb.addWorksheet('Detalle de actividades', { views: [{ state: 'frozen', ySplit: 5 }] });
@@ -291,4 +340,10 @@ export class PlanExportService {
 
     return Buffer.from(await wb.xlsx.writeBuffer());
   }
+}
+
+/** Título del documento según el cronograma solicitado */
+export function scheduleTitle(f: ActivityFilters, planTitle?: string | null) {
+  if (f.scheduleType) return `CRONOGRAMA DE MANTENIMIENTO ${SCHEDULE_TYPE_LABEL[f.scheduleType].toUpperCase()}`;
+  return planTitle || 'PLAN ANUAL DE MANTENIMIENTO';
 }

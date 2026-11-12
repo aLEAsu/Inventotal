@@ -22,7 +22,14 @@ const years = computed(() => Array.from({ length: 12 }, (_, i) => cat.year + 2 -
 const plan = ref<Record<string, any> | null>(null);
 const tab = ref('matrix');
 const f = ref({ month: null as number | null, areaId: null as string | null, categoryId: null as string | null, assetId: null as string | null, responsibleId: null as string | null, criticality: null as string | null, status: null as string | null, kind: null as string | null, q: '' });
-const matrix = ref<{ rows: Record<string, any>[]; today: string } | null>(null);
+type ScheduleType = 'PREVENTIVO' | 'CORRECTIVO';
+const scheduleType = ref<ScheduleType>(route.query.tipo === 'CORRECTIVO' ? 'CORRECTIVO' : 'PREVENTIVO');
+const view = ref<'grupos' | 'equipos'>(route.query.vista === 'equipos' ? 'equipos' : 'grupos');
+const typeOptions = [{ label: 'Preventivo', value: 'PREVENTIVO', icon: 'pi pi-shield' }, { label: 'Correctivo', value: 'CORRECTIVO', icon: 'pi pi-wrench' }];
+const viewOptions = [{ label: 'Por grupos', value: 'grupos', icon: 'pi pi-th-large' }, { label: 'Por equipo', value: 'equipos', icon: 'pi pi-list' }];
+const typeLabel = computed(() => (scheduleType.value === 'CORRECTIVO' ? 'correctivo' : 'preventivo'));
+type MatrixData = { rows: Record<string, any>[]; today: string; total: number; executed: number; assetCount: number; monthTotals: { total: number; executed: number }[] };
+const matrix = ref<MatrixData | null>(null);
 const detail = ref<{ items: Record<string, any>[]; total: number }>({ items: [], total: 0 });
 const summary = ref<Record<string, any> | null>(null);
 const history = ref<Record<string, any> | null>(null);
@@ -31,7 +38,7 @@ const loading = ref(false);
 const sort = ref({ field: 'committedDate', order: 1 });
 const page = ref({ first: 0, rows: 50 });
 
-const params = computed(() => Object.fromEntries(Object.entries(f.value).filter(([, v]) => v !== null && v !== '')));
+const params = computed(() => ({ ...Object.fromEntries(Object.entries(f.value).filter(([, v]) => v !== null && v !== '')), scheduleType: scheduleType.value }));
 
 async function loadPlan() {
   plan.value = (await http.get(`/plans/${year.value}`)).data.plan;
@@ -47,7 +54,7 @@ async function loadData() {
   try {
     const sortMap: Record<string, string> = { committedDate: 'committedDate', 'asset.code': 'asset', 'asset.area.name': 'area', 'responsible.fullName': 'responsible' };
     const [m, d, s] = await Promise.all([
-      http.get(`/plans/${year.value}/matrix`, { params: params.value }),
+      http.get(`/plans/${year.value}/matrix`, { params: { ...params.value, view: view.value } }),
       http.get(`/plans/${year.value}/activities`, { params: { ...params.value, page: page.value.first / page.value.rows + 1, pageSize: page.value.rows, sort: sortMap[sort.value.field] ?? 'committedDate', dir: sort.value.order === -1 ? 'desc' : 'asc' } }),
       http.get(`/plans/${year.value}/summary`, { params: params.value }),
     ]);
@@ -73,6 +80,11 @@ async function reload() {
     n.error(e);
   }
 }
+watch([scheduleType, view], ([tipo, vista]) => {
+  void router.replace({ query: { ...route.query, tipo, vista } });
+  page.value.first = 0;
+  void loadData();
+});
 watch(year, (y) => {
   void router.replace({ query: { ...route.query, year: String(y) } });
   page.value.first = 0;
@@ -105,7 +117,7 @@ async function generate() {
     if (!why) return;
   }
   busy.value = true;
-  const r = await n.run(() => http.post(`/plans/${year.value}/generate`, { reason: why }));
+  const r = await n.run(() => http.post(`/plans/${year.value}/generate`, { reason: why, scheduleType: scheduleType.value }));
   busy.value = false;
   if (r) {
     genResult.value = r.data;
@@ -122,22 +134,50 @@ async function transition(action: 'submit' | 'review' | 'return' | 'approve' | '
   if (why === null) return;
   if (await n.run(() => http.post(`/plans/${year.value}/${action}`, { reason: why || null }), 'Estado del plan actualizado')) await reload();
 }
-const exp = (kind: 'pdf' | 'xlsx', paper?: 'a4' | 'a3') =>
-  n.run(() => download(`/plans/${year.value}/export.${kind}`, { ...params.value, paper }, `Plan_${year.value}.${kind}`), kind === 'pdf' ? 'PDF descargado' : 'Excel descargado');
+const exp = (kind: 'pdf' | 'xlsx', paper?: 'a4' | 'a3', annex = false) =>
+  n.run(() => download(`/plans/${year.value}/export.${kind}`, { ...params.value, view: view.value, paper, annex: annex ? '1' : undefined }, `Cronograma_${typeLabel.value}_${year.value}.${kind}`), kind === 'pdf' ? 'PDF descargado' : 'Excel descargado');
+const exportMenu = ref();
+const exportItems = computed(() => [
+  { label: 'PDF A4 · una hoja', icon: 'pi pi-file-pdf', command: () => exp('pdf', 'a4') },
+  { label: 'PDF A3 · una hoja', icon: 'pi pi-file-pdf', command: () => exp('pdf', 'a3') },
+  { label: 'PDF con anexo por equipo', icon: 'pi pi-copy', command: () => exp('pdf', 'a4', true) },
+  { label: 'Excel', icon: 'pi pi-file-excel', command: () => exp('xlsx') },
+]);
 function printView() {
-  const q = new URLSearchParams(params.value as Record<string, string>).toString();
+  const q = new URLSearchParams({ ...(params.value as Record<string, string>), view: view.value }).toString();
   window.open(`/imprimir/cronograma/${year.value}${q ? `?${q}` : ''}`, '_blank');
 }
 
 // --------------------------------------------- Actividad
 const act = ref<Record<string, any> | null>(null);
 const actVisible = ref(false);
+const groupedCell = ref<Record<string, any> | null>(null);
+const groupedCellVisible = ref(false);
 const resched = ref({ toDate: null as Date | null, reason: '', autoApprove: false });
 async function openActivity(id: string) {
   act.value = (await http.get(`/activities/${id}`)).data;
   resched.value = { toDate: ymdToDate(act.value!.committedDate), reason: '', autoApprove: auth.can('plans.approve') };
   actVisible.value = true;
 }
+function openMatrixCell(cell: Record<string, any>, row: Record<string, any>) {
+  if (!row.grouped) {
+    void openActivity(cell.id);
+    return;
+  }
+  groupedCell.value = { ...cell, programName: row.programName, targetName: row.targetName, groupType: row.groupType };
+  groupedCellVisible.value = true;
+}
+function openGroupedActivity(id: string) {
+  groupedCellVisible.value = false;
+  void openActivity(id);
+}
+function matrixCellTitle(cell: Record<string, any>, grouped: boolean) {
+  const status = ACTIVITY_STATUS[cell.status]?.label ?? cell.status;
+  const detail = grouped ? `${cell.count} equipo(s) · ${cell.executed} ejecutado(s) · ${cell.mixed ? 'estados mixtos, el color muestra el más urgente' : status}` : status;
+  return `${fmtDate(cell.date)} · ${detail}${cell.rescheduled ? ' · con reprogramaciones' : ''}`;
+}
+const currentMonth = computed(() => (matrix.value?.today && Number(matrix.value.today.slice(0, 4)) === year.value ? Number(matrix.value.today.slice(5, 7)) - 1 : -1));
+const pct = (a: number, b: number) => (b ? Math.round((a / b) * 100) : 0);
 async function createWo() {
   const r = await n.run(() => http.post(`/workorders/from-activity/${act.value!.id}`, {}), 'Orden de trabajo creada');
   if (r) await router.push(`/ordenes/${r.data.id}`);
@@ -186,7 +226,7 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
     <div class="page-head">
       <div>
         <div class="row">
-          <h1>Cronograma anual de mantenimiento</h1>
+          <h1>Cronograma de mantenimiento {{ typeLabel }}</h1>
           <Select v-model="year" :options="years" aria-label="Año" data-testid="year-select" />
           <StatusTag v-if="plan" :value="plan.status" kind="plan" />
           <Tag v-if="plan" :value="`Versión ${plan.version}`" severity="secondary" />
@@ -198,12 +238,22 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
       </div>
       <div class="actions">
         <template v-if="plan && auth.can('plans.export')">
-          <Button label="Imprimir cronograma" icon="pi pi-print" severity="secondary" outlined data-testid="btn-print" @click="printView" />
-          <Button label="PDF A4" icon="pi pi-file-pdf" severity="secondary" outlined data-testid="btn-pdf" @click="exp('pdf', 'a4')" />
-          <Button label="PDF A3" icon="pi pi-file-pdf" severity="secondary" text @click="exp('pdf', 'a3')" />
-          <Button label="Exportar Excel" icon="pi pi-file-excel" severity="secondary" outlined data-testid="btn-xlsx" @click="exp('xlsx')" />
+          <Button label="Imprimir (una hoja)" icon="pi pi-print" severity="secondary" outlined data-testid="btn-print" @click="printView" />
+          <Button label="Exportar" icon="pi pi-download" severity="secondary" outlined data-testid="btn-export" aria-haspopup="true" @click="(e) => exportMenu.toggle(e)" />
+          <Menu ref="exportMenu" :model="exportItems" popup />
         </template>
       </div>
+    </div>
+
+    <div class="type-bar mb">
+      <SelectButton v-model="scheduleType" :options="typeOptions" option-label="label" option-value="value" :allow-empty="false" data-testid="schedule-type">
+        <template #option="{ option }"><i :class="option.icon" /> <span>Cronograma {{ option.label.toLowerCase() }}</span></template>
+      </SelectButton>
+      <span class="spacer" />
+      <span class="muted small">Ver:</span>
+      <SelectButton v-model="view" :options="viewOptions" option-label="label" option-value="value" :allow-empty="false" data-testid="matrix-view">
+        <template #option="{ option }"><i :class="option.icon" /> <span>{{ option.label }}</span></template>
+      </SelectButton>
     </div>
 
     <div class="card mb">
@@ -213,7 +263,7 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
           <Button v-if="auth.can('plans.generate')" label="Crear plan anual" icon="pi pi-plus" data-testid="btn-create-plan" @click="createPlan" />
         </template>
         <template v-else>
-          <Button v-if="auth.can('plans.generate') && canEditPlan" :label="plan.status === 'APROBADO' ? 'Agregar actividades nuevas' : 'Generar cronograma'" icon="pi pi-bolt" :loading="busy" data-testid="btn-generate" @click="generate" />
+          <Button v-if="auth.can('plans.generate') && canEditPlan" :label="plan.status === 'APROBADO' ? `Agregar actividades ${typeLabel}s nuevas` : `Generar cronograma ${typeLabel}`" icon="pi pi-bolt" :loading="busy" data-testid="btn-generate" @click="generate" />
           <Button v-if="auth.can('plans.submit') && plan.status === 'BORRADOR'" label="Enviar a revisión" icon="pi pi-send" severity="secondary" outlined @click="transition('submit')" />
           <Button v-if="auth.can('plans.approve') && plan.status === 'EN_REVISION'" label="Registrar revisión" icon="pi pi-eye" severity="secondary" outlined @click="transition('review')" />
           <Button v-if="auth.can('plans.approve') && plan.status === 'EN_REVISION'" label="Aprobar" icon="pi pi-verified" severity="success" @click="transition('approve')" />
@@ -221,7 +271,7 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
           <Button v-if="auth.can('plans.close') && plan.status === 'APROBADO'" label="Cerrar y archivar" icon="pi pi-lock" severity="contrast" text @click="transition('close')" />
           <span class="spacer" />
           <span v-if="plan.pendingReschedules" class="row"><i class="pi pi-clock" style="color: #b45309" /> {{ plan.pendingReschedules }} reprogramaciones pendientes</span>
-          <span v-if="summary" class="muted">{{ summary.total }} actividades</span>
+          <RouterLink :to="`/plan-maestro?tipo=${scheduleType}`" class="small">Definir grupos y periodicidades →</RouterLink>
         </template>
       </div>
     </div>
@@ -235,7 +285,7 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
         <Select v-model="f.responsibleId" :options="cat.users" option-label="fullName" option-value="id" placeholder="Responsable" show-clear filter />
         <Select v-model="f.criticality" :options="opts(CRITICALITY)" option-label="label" option-value="value" placeholder="Criticidad" show-clear />
         <Select v-model="f.status" :options="statusOpts" option-label="label" option-value="value" placeholder="Estado" show-clear />
-        <Select v-model="f.kind" :options="opts(KIND)" option-label="label" option-value="value" placeholder="Tipo" show-clear />
+        <Select v-if="scheduleType === 'PREVENTIVO'" v-model="f.kind" :options="opts(KIND).filter((o) => o.value !== 'CORRECTIVO')" option-label="label" option-value="value" placeholder="Tipo de actividad" show-clear />
         <InputText v-model="f.q" placeholder="Buscar…" />
       </div>
 
@@ -250,24 +300,78 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
           </TabList>
           <TabPanels>
             <TabPanel value="matrix">
+              <div v-if="matrix" class="kpis">
+                <div v-if="view === 'grupos'" class="k"><span class="v">{{ matrix.rows.length }}</span><span class="l">grupos</span></div>
+                <div class="k"><span class="v">{{ matrix.assetCount }}</span><span class="l">equipos</span></div>
+                <div class="k"><span class="v">{{ matrix.total }}</span><span class="l">intervenciones</span></div>
+                <div class="k grow">
+                  <div class="row"><span class="v">{{ pct(matrix.executed, matrix.total) }} %</span><span class="l">ejecutado ({{ matrix.executed }} de {{ matrix.total }})</span></div>
+                  <div class="bar"><span :style="{ width: `${pct(matrix.executed, matrix.total)}%` }" /></div>
+                </div>
+              </div>
               <div class="legend">
                 <span v-for="o in statusOpts" :key="o.value" class="lg" :class="cellClass(o.value)">{{ o.label }}</span>
-                <span class="muted">· El número es el día del mes · ↻ reprogramada</span>
+                <span class="muted">· {{ view === 'grupos' ? 'Celda: día del mes y equipos (ejecutados/programados); el color es el estado más urgente. Clic para ver los equipos.' : 'El número es el día del mes · ↻ reprogramada' }}</span>
               </div>
               <div class="mx-wrap">
-                <table class="mx" data-testid="matrix">
-                  <thead><tr><th class="sticky">Activo / mantenimiento</th><th>Área</th><th>Periodicidad</th><th v-for="m in MONTHS_SHORT" :key="m">{{ m }}</th></tr></thead>
+                <table class="mx" :class="view" data-testid="matrix">
+                  <thead>
+                    <tr>
+                      <th class="sticky">{{ view === 'grupos' ? 'Grupo de mantenimiento' : 'Equipo' }}</th>
+                      <th v-if="view === 'grupos'" class="c">Equipos</th>
+                      <th>Periodicidad</th>
+                      <th>Responsable</th>
+                      <th v-for="(m, i) in MONTHS_SHORT" :key="m" class="c" :class="{ cur: i === currentMonth }">{{ m }}</th>
+                      <th class="c">Total</th>
+                    </tr>
+                  </thead>
                   <tbody>
-                    <tr v-if="!matrix?.rows.length"><td :colspan="15" class="empty">{{ loading ? 'Cargando…' : 'Sin actividades. Genere el cronograma o ajuste los filtros.' }}</td></tr>
-                    <tr v-for="r in matrix?.rows" :key="r.programId">
-                      <td class="sticky"><RouterLink :to="`/activos/${r.assetId}`" class="mono">{{ r.assetCode }}</RouterLink> {{ r.assetName }}<div class="muted">{{ r.programName }}</div></td>
-                      <td>{{ r.areaName }}</td>
-                      <td class="nowrap">{{ r.frequency }}</td>
-                      <td v-for="(cell, mi) in r.months" :key="mi" class="mc">
-                        <button v-for="x in cell" :key="x.id" class="chip" :class="cellClass(x.status)" :title="`${fmtDate(x.date)} · ${ACTIVITY_STATUS[x.status].label}${x.rescheduled ? ` · original ${fmtDate(x.originalDate)}` : ''}`" @click="openActivity(x.id)">{{ x.day }}<span v-if="x.rescheduled">↻</span></button>
+                    <tr v-if="!matrix?.rows.length">
+                      <td :colspan="view === 'grupos' ? 17 : 16" class="empty">
+                        <template v-if="loading">Cargando…</template>
+                        <template v-else>
+                          <div><strong>No hay actividades en el cronograma {{ typeLabel }} de {{ year }}.</strong></div>
+                          <div class="muted mt">Defina en el plan maestro los grupos (categoría, subcategoría o agrupación personalizada) con su tipo «{{ typeLabel }}» y periodicidad; luego pulse «Generar cronograma {{ typeLabel }}».</div>
+                          <RouterLink :to="`/plan-maestro?tipo=${scheduleType}&nuevo=grupo`"><Button class="mt" :label="`Definir programa ${typeLabel} por grupo`" icon="pi pi-plus" size="small" /></RouterLink>
+                        </template>
                       </td>
                     </tr>
+                    <tr v-for="r in matrix?.rows" :key="r.rowId">
+                      <td class="sticky">
+                        <template v-if="view === 'grupos'">
+                          <div class="gname">{{ r.targetName }}</div>
+                          <div class="small">{{ r.programName }}</div>
+                          <div class="gtype">{{ r.groupType }}</div>
+                        </template>
+                        <template v-else>
+                          <RouterLink :to="`/activos/${r.assetId}`" class="mono">{{ r.assetCode }}</RouterLink> {{ r.assetName }}
+                          <div class="muted small">{{ r.targetName }} · {{ r.programName }}</div>
+                        </template>
+                      </td>
+                      <td v-if="view === 'grupos'" class="c"><span class="badge">{{ r.assetCount }}</span></td>
+                      <td class="small per">{{ r.frequency }}</td>
+                      <td class="small resp">{{ r.responsible ?? '—' }}</td>
+                      <td v-for="(cell, mi) in r.months" :key="mi" class="mc" :class="{ cur: mi === currentMonth }">
+                        <button v-for="x in cell" :key="x.id" class="chip" :class="[cellClass(x.status), { mixed: x.mixed }]" :title="matrixCellTitle(x, view === 'grupos')" @click="openMatrixCell(x, r)">
+                          <span class="d">{{ x.day }}<span v-if="x.rescheduled">↻</span></span>
+                          <template v-if="view === 'grupos'">
+                            <span class="n">{{ x.executed ? `${x.executed}/${x.count}` : `${x.count} eq` }}</span>
+                            <span class="pb"><span :style="{ width: `${pct(x.executed, x.count)}%` }" /></span>
+                          </template>
+                        </button>
+                      </td>
+                      <td class="c tot">{{ r.total }}<div v-if="r.executed" class="muted small">{{ pct(r.executed, r.total) }} %</div></td>
+                    </tr>
                   </tbody>
+                  <tfoot v-if="matrix?.rows.length">
+                    <tr>
+                      <td class="sticky">Total por mes</td>
+                      <td v-if="view === 'grupos'" class="c">{{ matrix.assetCount }}</td>
+                      <td /><td />
+                      <td v-for="(m, i) in matrix.monthTotals" :key="i" class="c" :class="{ cur: i === currentMonth }">{{ m.total || '·' }}</td>
+                      <td class="c">{{ matrix.total }}</td>
+                    </tr>
+                  </tfoot>
                 </table>
               </div>
             </TabPanel>
@@ -363,6 +467,18 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
           <div class="card kpi"><span class="l">Excluidas / reactivadas</span><span class="v">{{ genResult.excluded }} / {{ genResult.reactivated }}</span></div>
         </div>
         <p class="muted">Programas evaluados: {{ genResult.programsEvaluated }}. La generación es idempotente: repetirla no duplica actividades.</p>
+        <Message v-if="genResult.programsEvaluated === 0 && genResult.eligibilityDiagnostics" severity="warn" :closable="false">
+          <p>No hay programas elegibles para {{ genResult.year }}. «Programa vigente» solo indica que está activo; además, las fechas de vigencia deben cruzar el año y el equipo no puede estar retirado ni dado de baja.</p>
+          <ul class="mb">
+            <li>Programas inactivos: {{ genResult.eligibilityDiagnostics.inactivePrograms }}</li>
+            <li>Asociados a equipos retirados o dados de baja: {{ genResult.eligibilityDiagnostics.inactiveAssets }}</li>
+            <li>Agrupaciones sin equipos habilitados: {{ genResult.eligibilityDiagnostics.noEligibleAssets }}</li>
+            <li>Con inicio posterior a {{ genResult.year }}: {{ genResult.eligibilityDiagnostics.startsAfterYear }}</li>
+            <li>Con vigencia terminada antes de {{ genResult.year }}: {{ genResult.eligibilityDiagnostics.expiredBeforeYear }}</li>
+            <li>Elegibles: {{ genResult.eligibilityDiagnostics.eligiblePrograms }}</li>
+          </ul>
+          <RouterLink to="/plan-maestro">Revisar el plan maestro de mantenimiento</RouterLink>.
+        </Message>
         <div v-if="Object.keys(genResult.byCategory).length" class="grid g2">
           <div><h3 class="mb">Por categoría</h3><div v-for="(v, k) in genResult.byCategory" :key="k" class="row"><span>{{ k }}</span><span class="spacer" /><strong>{{ v }}</strong></div></div>
           <div><h3 class="mb">Por mes</h3><div v-for="(v, i) in (genResult.byMonth as number[])" :key="i" class="row"><span>{{ MONTHS[i] }}</span><span class="spacer" /><strong>{{ v }}</strong></div></div>
@@ -370,6 +486,24 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
         <Message v-for="e in genResult.errors" :key="e.program" severity="error" :closable="false" class="mt">{{ e.program }}: {{ e.error }}</Message>
       </template>
       <template #footer><Button label="Cerrar" @click="genResult = null" /></template>
+    </Dialog>
+
+    <Dialog v-model:visible="groupedCellVisible" modal header="Equipos del grupo en esta fecha" :style="{ width: '760px', maxWidth: '96vw' }">
+      <template v-if="groupedCell">
+        <div class="row mb">
+          <div><strong>{{ groupedCell.targetName }}</strong> · {{ groupedCell.programName }}<div class="muted small">{{ groupedCell.groupType }} · {{ fmtDate(groupedCell.date) }}</div></div>
+          <span class="spacer" />
+          <Tag :value="`${groupedCell.executed} de ${groupedCell.count} ejecutados`" :severity="groupedCell.executed === groupedCell.count ? 'success' : 'secondary'" />
+        </div>
+        <DataTable :value="groupedCell.activities ?? []" size="small">
+          <template #empty><div class="empty">No hay equipos asociados a esta fecha.</div></template>
+          <Column field="assetCode" header="Código" />
+          <Column field="assetName" header="Equipo" />
+          <Column header="Estado"><template #body="{ data }"><StatusTag :value="data.status" kind="activity" /></template></Column>
+          <Column header="Reprogramada"><template #body="{ data }">{{ data.rescheduled ? 'Sí' : 'No' }}</template></Column>
+          <Column style="width: 130px"><template #body="{ data }"><Button label="Ver detalle" size="small" text @click="openGroupedActivity(data.id)" /></template></Column>
+        </DataTable>
+      </template>
     </Dialog>
 
     <!-- Actividad -->
@@ -417,16 +551,46 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
 </template>
 
 <style scoped>
-.mx-wrap { overflow: auto; max-height: 70vh; border: 1px solid var(--app-border); border-radius: 8px; }
-.mx { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 0.84rem; }
-.mx th { position: sticky; top: 0; background: #f1f5f9; z-index: 2; padding: 7px 6px; border-bottom: 1px solid var(--app-border); font-weight: 600; text-align: left; }
-.mx td { padding: 5px 6px; border-bottom: 1px solid #eef2f6; vertical-align: top; }
-.mx .sticky { position: sticky; left: 0; background: #fff; z-index: 1; min-width: 260px; max-width: 320px; }
-.mx th.sticky { z-index: 3; background: #f1f5f9; }
-.mc { min-width: 54px; text-align: center; }
-.chip { border: 0; border-radius: 5px; padding: 2px 5px; margin: 1px; font-size: 0.78rem; font-weight: 600; cursor: pointer; }
+.type-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.type-bar :deep(.p-togglebutton-content) { gap: 6px; }
+.small { font-size: 0.8rem; }
+.kpis { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+.kpis .k { display: flex; flex-direction: column; gap: 4px; padding: 10px 14px; border: 1px solid var(--app-border); border-radius: 8px; background: #f8fafc; min-width: 110px; }
+.kpis .k.grow { flex: 1; min-width: 220px; }
+.kpis .v { font-size: 1.35rem; font-weight: 650; line-height: 1.1; color: #0f3d56; }
+.kpis .l { color: var(--app-muted); font-size: 0.8rem; }
+.bar { height: 6px; border-radius: 3px; background: #e2e8f0; overflow: hidden; }
+.bar span { display: block; height: 100%; background: #15803d; }
 .legend { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; align-items: center; font-size: 0.8rem; }
 .lg { padding: 2px 8px; border-radius: 5px; }
+.mx-wrap { overflow: auto; max-height: 70vh; border: 1px solid var(--app-border); border-radius: 8px; }
+.mx { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 0.84rem; }
+.mx th { position: sticky; top: 0; background: #0f3d56; color: #fff; z-index: 2; padding: 8px 6px; font-weight: 600; text-align: left; font-size: 0.8rem; white-space: nowrap; }
+.mx th.cur { background: #0369a1; }
+.mx td { padding: 6px; border-bottom: 1px solid #eef2f6; border-right: 1px solid #f1f5f9; vertical-align: middle; }
+.mx tbody tr:nth-child(even) td { background: #fbfcfe; }
+.mx tbody tr:hover td { background: #f0f9ff; }
+.mx .c { text-align: center; }
+.mx .sticky { position: sticky; left: 0; background: #fff; z-index: 1; min-width: 220px; max-width: 300px; box-shadow: 1px 0 0 var(--app-border); }
+.mx th.sticky { z-index: 3; background: #0f3d56; }
+.mx td.cur { background: #f0f9ff !important; }
+.gname { font-weight: 650; color: #0f3d56; }
+.gtype { display: inline-block; margin-top: 3px; font-size: 0.7rem; color: #475569; background: #f1f5f9; border-radius: 4px; padding: 0 6px; }
+.badge { display: inline-block; min-width: 28px; padding: 2px 8px; border-radius: 999px; background: #e0f2fe; color: #075985; font-weight: 650; font-size: 0.8rem; }
+.mc { min-width: 58px; text-align: center; }
+.per { min-width: 150px; }
+.resp { min-width: 110px; }
+.chip { display: inline-flex; flex-direction: column; align-items: center; gap: 1px; border: 0; border-radius: 6px; padding: 3px 6px 4px; margin: 1px; font-size: 0.78rem; font-weight: 650; cursor: pointer; line-height: 1.15; min-width: 34px; }
+.chip:hover { outline: 2px solid rgba(15, 61, 86, 0.35); }
+.chip.mixed { box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18); }
+.chip .d { font-size: 0.82rem; }
+.chip .n { font-size: 0.68rem; font-weight: 600; opacity: 0.85; white-space: nowrap; }
+.chip .pb { display: block; width: 100%; height: 3px; border-radius: 2px; background: rgba(0, 0, 0, 0.1); overflow: hidden; }
+.chip .pb span { display: block; height: 100%; background: #15803d; }
+.tot { font-weight: 700; }
+.mx tfoot td { position: sticky; bottom: 0; background: #e2e8f0; font-weight: 700; border-top: 1px solid #cbd5e1; z-index: 1; }
+.mx tfoot td.sticky { z-index: 2; background: #e2e8f0; }
+.empty { text-align: center; padding: 28px 12px !important; }
 .st-PROGRAMADO { background: #dbeafe; color: #1e3a8a; }
 .st-PROXIMO { background: #fef3c7; color: #92400e; }
 .st-EN_EJECUCION { background: #e0e7ff; color: #3730a3; }

@@ -18,18 +18,22 @@ const Filters = z.object({
   responsibleId: z.string().uuid().optional(),
   criticality: z.enum(['CRITICA', 'ALTA', 'MEDIA', 'BAJA']).optional(),
   status: DSTATUS.optional(),
-  kind: z.enum(['PREVENTIVO', 'INSPECCION', 'CALIBRACION', 'VERIFICACION_METROLOGICA', 'LIMPIEZA', 'PRUEBA_FUNCIONAL', 'OTRO']).optional(),
+  kind: z.enum(['PREVENTIVO', 'CORRECTIVO', 'INSPECCION', 'CALIBRACION', 'VERIFICACION_METROLOGICA', 'LIMPIEZA', 'PRUEBA_FUNCIONAL', 'OTRO']).optional(),
   q: z.string().trim().max(100).optional(),
+  /** Cronograma: PREVENTIVO (todo menos correctivo) o CORRECTIVO */
+  scheduleType: z.enum(['PREVENTIVO', 'CORRECTIVO']).optional(),
 });
+const MatrixQuery = Filters.extend({ view: z.enum(['grupos', 'equipos']).default('grupos') });
 const ListQuery = Filters.extend({
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(1000).default(100),
   sort: z.enum(['committedDate', 'asset', 'area', 'responsible']).default('committedDate'),
   dir: z.enum(['asc', 'desc']).default('asc'),
 });
-const ExportQuery = Filters.extend({ paper: z.enum(['a4', 'a3']).default('a4') });
+const ExportQuery = MatrixQuery.extend({ paper: z.enum(['a4', 'a3']).default('a4'), annex: z.enum(['0', '1']).default('0') });
+const XlsxQuery = MatrixQuery;
 const CreatePlan = z.object({ notes: zOptText(2000) });
-const Generate = z.object({ reason: zOptText(2000) });
+const Generate = z.object({ reason: zOptText(2000), scheduleType: z.enum(['PREVENTIVO', 'CORRECTIVO']).nullish() });
 const Transition = z.object({ reason: zOptText(2000) });
 const RescheduleReq = z.object({ toDate: zYmd, reason: zReason, autoApprove: z.boolean().default(false) });
 const Decision = z.object({ approve: z.boolean(), note: zOptText(2000) });
@@ -74,7 +78,7 @@ export class PlansController {
   @Perms('plans.generate')
   @ApiZBody(Generate)
   generate(@Ctx() ctx: ReqCtx, @Param('year', ParseIntPipe) year: number, @ZBody(Generate) b: z.infer<typeof Generate>) {
-    return this.svc.generate(ctx, year, b.reason);
+    return this.svc.generate(ctx, year, b.reason, b.scheduleType ?? null);
   }
 
   @Post('plans/:year/submit')
@@ -113,9 +117,10 @@ export class PlansController {
 
   @Get('plans/:year/matrix')
   @Perms('plans.read')
-  @ApiZQuery(Filters)
-  matrix(@Ctx() ctx: ReqCtx, @Param('year', ParseIntPipe) year: number, @ZQuery(Filters) f: z.infer<typeof Filters>) {
-    return this.svc.matrix(ctx, year, f);
+  @ApiZQuery(MatrixQuery)
+  matrix(@Ctx() ctx: ReqCtx, @Param('year', ParseIntPipe) year: number, @ZQuery(MatrixQuery) q: z.infer<typeof MatrixQuery>) {
+    const { view, ...f } = q;
+    return this.svc.matrix(ctx, year, f, view);
   }
 
   @Get('plans/:year/summary')
@@ -135,8 +140,8 @@ export class PlansController {
   @Perms('plans.export')
   @ApiZQuery(ExportQuery)
   async exportPdf(@Ctx() ctx: ReqCtx, @Param('year', ParseIntPipe) year: number, @ZQuery(ExportQuery) q: z.infer<typeof ExportQuery>, @Res() res: Response) {
-    const { paper, ...f } = q;
-    const buf = await this.exporter.pdf(ctx, year, f, paper);
+    const { paper, view, annex, ...f } = q;
+    const buf = await this.exporter.pdf(ctx, year, f, paper, view, annex === '1');
     await this.audit.log(ctx, { action: 'EXPORTAR_PDF', module: 'cronograma', entity: 'AnnualPlan', entityId: String(year), after: { filtros: f, paper, bytes: buf.length } });
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="Plan_Anual_Mantenimiento_${year}.pdf"`);
@@ -145,9 +150,10 @@ export class PlansController {
 
   @Get('plans/:year/export.xlsx')
   @Perms('plans.export')
-  @ApiZQuery(Filters)
-  async exportXlsx(@Ctx() ctx: ReqCtx, @Param('year', ParseIntPipe) year: number, @ZQuery(Filters) f: z.infer<typeof Filters>, @Res() res: Response) {
-    const buf = await this.exporter.xlsx(ctx, year, f);
+  @ApiZQuery(XlsxQuery)
+  async exportXlsx(@Ctx() ctx: ReqCtx, @Param('year', ParseIntPipe) year: number, @ZQuery(XlsxQuery) q: z.infer<typeof XlsxQuery>, @Res() res: Response) {
+    const { view, ...f } = q;
+    const buf = await this.exporter.xlsx(ctx, year, f, view);
     await this.audit.log(ctx, { action: 'EXPORTAR_EXCEL', module: 'cronograma', entity: 'AnnualPlan', entityId: String(year), after: { filtros: f, bytes: buf.length } });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="Plan_Anual_Mantenimiento_${year}.xlsx"`);

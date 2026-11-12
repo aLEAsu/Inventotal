@@ -35,6 +35,28 @@ export interface ActivityFilters {
   status?: DisplayStatus;
   kind?: string;
   q?: string;
+  /** Cronograma preventivo (todos los tipos excepto correctivo) o correctivo */
+  scheduleType?: ScheduleType;
+}
+
+export type ScheduleType = 'PREVENTIVO' | 'CORRECTIVO';
+export type MatrixView = 'grupos' | 'equipos';
+
+/** Filtro de programas según el cronograma solicitado */
+export function scheduleKindWhere(scheduleType?: ScheduleType | null): Prisma.MaintenanceProgramWhereInput {
+  if (scheduleType === 'CORRECTIVO') return { kind: 'CORRECTIVO' };
+  if (scheduleType === 'PREVENTIVO') return { kind: { not: 'CORRECTIVO' } };
+  return {};
+}
+
+export const SCHEDULE_TYPE_LABEL: Record<ScheduleType, string> = { PREVENTIVO: 'Preventivo', CORRECTIVO: 'Correctivo' };
+
+/** Prioridad para resumir el estado de varias actividades en una celda agrupada (la más urgente primero) */
+const STATUS_PRIORITY: DisplayStatus[] = ['VENCIDO', 'PROXIMO', 'EN_EJECUCION', 'REPROGRAMADO', 'PROGRAMADO', 'EJECUTADO', 'CANCELADO', 'NO_APLICA'];
+export function summarizeStatus(statuses: DisplayStatus[]): DisplayStatus {
+  const active = statuses.filter((x) => x !== 'CANCELADO' && x !== 'NO_APLICA');
+  const pool = active.length ? active : statuses;
+  return STATUS_PRIORITY.find((x) => pool.includes(x)) ?? statuses[0];
 }
 
 const EXCLUDED_PREFIX = 'Excluida en regeneración';
@@ -109,7 +131,7 @@ export class PlansService {
    *   marcadas como "agregadas después de aprobación"; exige justificación e incrementa la versión.
    * - CERRADO: no se permite.
    */
-  async generate(ctx: ReqCtx, year: number, reason?: string | null) {
+  async generate(ctx: ReqCtx, year: number, reason?: string | null, scheduleType: ScheduleType | null = null) {
     this.validateYear(year);
     return this.prisma.$transaction(
       async (tx) => {
@@ -126,22 +148,86 @@ export class PlansService {
         const yEnd = parseYmd(`${year}-12-31`);
         const programs = await tx.maintenanceProgram.findMany({
           where: {
+            ...scheduleKindWhere(scheduleType),
             isActive: true,
             startDate: { lte: yEnd },
             OR: [{ endDate: null }, { endDate: { gte: yStart } }],
-            asset: { status: { notIn: INACTIVE_STATUSES } },
           },
           include: {
-            asset: { include: { area: true, category: true } },
+            asset: { select: { id: true, status: true } },
+            category: { select: { id: true, name: true } },
+            subcategory: { select: { id: true, name: true } },
+            group: { select: { id: true, name: true, isActive: true, assets: { select: { assetId: true } } } },
             supplier: { select: { name: true } },
           },
         });
+        const targetClauses: Prisma.AssetWhereInput[] = [];
+        for (const p of programs) {
+          if (p.targetType === 'ACTIVO' && p.assetId) targetClauses.push({ id: p.assetId });
+          if (p.targetType === 'CATEGORIA' && p.categoryId) targetClauses.push({ categoryId: p.categoryId });
+          if (p.targetType === 'SUBCATEGORIA' && p.subcategoryId) targetClauses.push({ subcategoryId: p.subcategoryId });
+          if (p.targetType === 'GRUPO' && p.group?.isActive && p.group.assets.length) {
+            targetClauses.push({ id: { in: p.group.assets.map((m) => m.assetId) } });
+          }
+        }
+        const targetAssets = targetClauses.length
+          ? await tx.asset.findMany({
+              where: { status: { notIn: INACTIVE_STATUSES }, OR: targetClauses },
+              include: { area: true, category: true },
+            })
+          : [];
+        const assetsByProgram = new Map(programs.map((p) => {
+          let matches = targetAssets;
+          if (p.targetType === 'ACTIVO') matches = targetAssets.filter((a) => a.id === p.assetId);
+          if (p.targetType === 'CATEGORIA') matches = targetAssets.filter((a) => a.categoryId === p.categoryId);
+          if (p.targetType === 'SUBCATEGORIA') matches = targetAssets.filter((a) => a.subcategoryId === p.subcategoryId);
+          if (p.targetType === 'GRUPO') {
+            const ids = new Set(p.group?.isActive ? p.group.assets.map((m) => m.assetId) : []);
+            matches = targetAssets.filter((a) => ids.has(a.id));
+          }
+          return [p.id, matches];
+        }));
+        const evaluatedPrograms = programs.filter((p) => (assetsByProgram.get(p.id)?.length ?? 0) > 0);
+        let eligibilityDiagnostics: {
+          totalPrograms: number;
+          inactivePrograms: number;
+          inactiveAssets: number;
+          startsAfterYear: number;
+          expiredBeforeYear: number;
+          noEligibleAssets: number;
+          eligiblePrograms: number;
+        } | null = null;
+        if (!evaluatedPrograms.length) {
+          const allPrograms = await tx.maintenanceProgram.findMany({
+            where: scheduleKindWhere(scheduleType),
+            select: { id: true, isActive: true, startDate: true, endDate: true, targetType: true, asset: { select: { status: true } } },
+          });
+          eligibilityDiagnostics = {
+            totalPrograms: allPrograms.length,
+            inactivePrograms: 0,
+            inactiveAssets: 0,
+            startsAfterYear: 0,
+            expiredBeforeYear: 0,
+            noEligibleAssets: 0,
+            eligiblePrograms: 0,
+          };
+          for (const p of allPrograms) {
+            if (!p.isActive) eligibilityDiagnostics.inactivePrograms++;
+            else if (p.startDate > yEnd) eligibilityDiagnostics.startsAfterYear++;
+            else if (p.endDate && p.endDate < yStart) eligibilityDiagnostics.expiredBeforeYear++;
+            else if (!assetsByProgram.get(p.id)?.length) {
+              if (p.targetType === 'ACTIVO' && p.asset && INACTIVE_STATUSES.includes(p.asset.status)) eligibilityDiagnostics.inactiveAssets++;
+              else eligibilityDiagnostics.noEligibleAssets++;
+            } else eligibilityDiagnostics.eligiblePrograms++;
+          }
+        }
+        // Solo se comparan las actividades del cronograma que se está generando (preventivo / correctivo)
         const existing = await tx.scheduledActivity.findMany({
-          where: { planId: plan.id },
-          select: { id: true, programId: true, periodKey: true, status: true, statusReason: true, workOrder: { select: { id: true } } },
+          where: { planId: plan.id, program: scheduleKindWhere(scheduleType) },
+          select: { id: true, programId: true, assetId: true, periodKey: true, status: true, statusReason: true, workOrder: { select: { id: true } } },
         });
-        const existingKey = new Map(existing.map((e) => [`${e.programId}|${e.periodKey}`, e]));
-        const programsWithActs = new Set(existing.map((e) => e.programId));
+        const existingKey = new Map(existing.map((e) => [`${e.programId}|${e.assetId}|${e.periodKey}`, e]));
+        const assetsWithActs = new Set(existing.map((e) => `${e.programId}|${e.assetId}`));
 
         const toCreate: Prisma.ScheduledActivityCreateManyInput[] = [];
         const desired = new Set<string>();
@@ -150,15 +236,15 @@ export class PlansService {
         const byMonth: number[] = Array(12).fill(0);
         let skippedExisting = 0;
 
-        for (const p of programs) {
-          if (approved && programsWithActs.has(p.id)) continue; // no se alteran programas ya aprobados
+        for (const p of evaluatedPrograms) {
           let dates: string[];
           try {
             dates = occurrencesInYear(
               {
                 frequencyType: p.frequencyType, intervalValue: p.intervalValue, intervalUnit: p.intervalUnit,
                 specificDates: p.specificDates, startDate: fmtYmd(p.startDate), baseDate: fmtYmd(p.baseDate),
-                endDate: p.endDate ? fmtYmd(p.endDate) : null,
+                endDate: p.endDate ? fmtYmd(p.endDate) : null, monthsOfYear: p.monthsOfYear,
+                weekOfMonth: p.weekOfMonth, dayOfWeek: p.dayOfWeek,
               },
               year,
             );
@@ -166,28 +252,35 @@ export class PlansService {
             errors.push({ program: p.code, error: (e as Error).message });
             continue;
           }
-          const decommission = p.asset.decommissionedAt ? fmtYmd(p.asset.decommissionedAt) : null;
-          const snapshot = {
-            programCode: p.code, programName: p.name, kind: p.kind, frequencyType: p.frequencyType,
-            frequencyLabel: describeRule(p), programVersion: p.version, assetCode: p.asset.code, assetName: p.asset.name,
-            areaName: p.asset.area.name, categoryName: p.asset.category.name, supplierName: p.supplier?.name ?? null,
-            estimatedDurationMin: p.estimatedDurationMin,
-          };
-          for (const date of dates) {
-            if (decommission && date >= decommission) continue;
-            const key = `${p.id}|${date}`;
-            desired.add(key);
-            if (existingKey.has(key)) {
-              skippedExisting++;
-              continue;
+          const targetName = p.targetType === 'ACTIVO' ? p.name
+            : p.targetType === 'CATEGORIA' ? p.category?.name
+              : p.targetType === 'SUBCATEGORIA' ? p.subcategory?.name : p.group?.name;
+          for (const asset of assetsByProgram.get(p.id) ?? []) {
+            if (approved && assetsWithActs.has(`${p.id}|${asset.id}`)) continue;
+            const decommission = asset.decommissionedAt ? fmtYmd(asset.decommissionedAt) : null;
+            const snapshot = {
+              programCode: p.code, programName: p.name, kind: p.kind, frequencyType: p.frequencyType,
+              frequencyLabel: describeRule(p), programVersion: p.version, assetCode: asset.code, assetName: asset.name,
+              areaName: asset.area.name, categoryName: asset.category.name, supplierName: p.supplier?.name ?? null,
+              targetType: p.targetType, targetName: targetName ?? null, displayMode: p.displayMode,
+              estimatedDurationMin: p.estimatedDurationMin,
+            };
+            for (const date of dates) {
+              if (decommission && date >= decommission) continue;
+              const key = `${p.id}|${asset.id}|${date}`;
+              desired.add(key);
+              if (existingKey.has(key)) {
+                skippedExisting++;
+                continue;
+              }
+              toCreate.push({
+                planId: plan.id, programId: p.id, assetId: asset.id, periodKey: date,
+                originalDate: parseYmd(date), committedDate: parseYmd(date), status: 'PROGRAMADO',
+                responsibleId: p.responsibleId, addedAfterApproval: approved, programSnapshot: snapshot,
+              });
+              byCategory[asset.category.name] = (byCategory[asset.category.name] ?? 0) + 1;
+              byMonth[Number(date.slice(5, 7)) - 1]++;
             }
-            toCreate.push({
-              planId: plan.id, programId: p.id, assetId: p.assetId, periodKey: date,
-              originalDate: parseYmd(date), committedDate: parseYmd(date), status: 'PROGRAMADO',
-              responsibleId: p.responsibleId, addedAfterApproval: approved, programSnapshot: snapshot,
-            });
-            byCategory[p.asset.category.name] = (byCategory[p.asset.category.name] ?? 0) + 1;
-            byMonth[Number(date.slice(5, 7)) - 1]++;
           }
         }
 
@@ -201,7 +294,7 @@ export class PlansService {
         let reactivated = 0;
         if (!approved) {
           const obsolete = existing.filter(
-            (e) => !desired.has(`${e.programId}|${e.periodKey}`) && (e.status === 'PROGRAMADO' || e.status === 'REPROGRAMADO') && !e.workOrder,
+            (e) => !desired.has(`${e.programId}|${e.assetId}|${e.periodKey}`) && (e.status === 'PROGRAMADO' || e.status === 'REPROGRAMADO') && !e.workOrder,
           );
           if (obsolete.length) {
             const r = await tx.scheduledActivity.updateMany({
@@ -211,7 +304,7 @@ export class PlansService {
             excluded = r.count;
           }
           const back = existing.filter(
-            (e) => desired.has(`${e.programId}|${e.periodKey}`) && e.status === 'NO_APLICA' && e.statusReason?.startsWith(EXCLUDED_PREFIX),
+            (e) => desired.has(`${e.programId}|${e.assetId}|${e.periodKey}`) && e.status === 'NO_APLICA' && e.statusReason?.startsWith(EXCLUDED_PREFIX),
           );
           if (back.length) {
             const r = await tx.scheduledActivity.updateMany({
@@ -224,7 +317,7 @@ export class PlansService {
 
         const newVersion = approved && created > 0 ? plan.version + 1 : plan.version;
         await tx.annualPlan.update({ where: { id: plan.id }, data: { lastGeneratedAt: new Date(), version: newVersion } });
-        const detail = { created, skippedExisting, excluded, reactivated, programsEvaluated: programs.length, byCategory, byMonth, errors };
+        const detail = { scheduleType, created, skippedExisting, excluded, reactivated, programsEvaluated: evaluatedPrograms.length, eligibilityDiagnostics, byCategory, byMonth, errors };
         await tx.annualPlanEvent.create({
           data: { planId: plan.id, action: approved ? 'AGREGAR_ACTIVIDADES' : 'GENERAR', version: newVersion, detail, reason: reason ?? null, userId: ctx.user.id },
         });
@@ -331,7 +424,7 @@ export class PlansService {
       },
       ...(f.assetId ? { assetId: f.assetId } : {}),
       ...(f.responsibleId ? { responsibleId: f.responsibleId } : {}),
-      ...(f.kind ? { program: { kind: f.kind as never } } : {}),
+      program: { AND: [f.kind ? { kind: f.kind as never } : {}, scheduleKindWhere(f.scheduleType)] },
     };
     if (f.month) {
       const m = String(f.month).padStart(2, '0');
@@ -416,8 +509,8 @@ export class PlansService {
     const rows = await this.prisma.scheduledActivity.findMany({
       where,
       include: {
-        asset: { select: { id: true, code: true, name: true, criticality: true, area: { select: { id: true, name: true } }, category: { select: { id: true, name: true } }, location: { select: { name: true } } } },
-        program: { select: { id: true, code: true, name: true, kind: true, frequencyType: true, intervalValue: true, intervalUnit: true, specificDates: true } },
+        asset: { select: { id: true, code: true, name: true, criticality: true, area: { select: { id: true, name: true } }, category: { select: { id: true, name: true } }, subcategory: { select: { id: true, name: true } }, location: { select: { name: true } } } },
+        program: { select: { id: true, code: true, name: true, kind: true, targetType: true, frequencyType: true, intervalValue: true, intervalUnit: true, specificDates: true, displayMode: true, group: { select: { name: true } }, category: { select: { name: true } }, subcategory: { select: { name: true } } } },
         responsible: { select: { id: true, fullName: true } },
         workOrder: { select: { code: true } },
       },
@@ -426,28 +519,116 @@ export class PlansService {
     return { plan, today, items: rows.map((a) => this.presentActivity(a, today, upcoming)) };
   }
 
-  /** Vista matricial: filas = programas (activo + mantenimiento), columnas = 12 meses */
-  async matrix(ctx: ReqCtx, year: number, f: ActivityFilters) {
+  /**
+   * Vista matricial del cronograma (12 meses).
+   * - view = 'grupos' (predeterminada): una fila por grupo de mantenimiento. Los programas por categoría,
+   *   subcategoría o agrupación personalizada forman su propio grupo; los programas por activo individual se
+   *   consolidan por subcategoría (o categoría), tipo y periodicidad. Cada celda resume los equipos de esa fecha.
+   * - view = 'equipos': una fila por equipo y programa (detalle completo).
+   * Las actividades, órdenes y el seguimiento se conservan siempre por equipo.
+   */
+  async matrix(ctx: ReqCtx, year: number, f: ActivityFilters, view: MatrixView = 'grupos') {
     const { plan, items, today } = await this.allActivities(ctx, year, { ...f, month: undefined });
-    const rows = new Map<string, { programId: string; programCode: string; programName: string; assetId: string; assetCode: string; assetName: string; areaName: string; categoryName: string; criticality: string; frequency: string; responsible: string | null; months: { id: string; day: number; date: string; status: DisplayStatus; rescheduled: boolean; originalDate: string }[][] }>();
+    type Item = (typeof items)[number];
+    type MatrixActivity = { id: string; assetId: string; assetCode: string; assetName: string; status: DisplayStatus; rescheduled: boolean; originalDate: string };
+    type MatrixCell = {
+      id: string; day: number; date: string; status: DisplayStatus; mixed: boolean; rescheduled: boolean; originalDate: string;
+      count: number; executed: number; activities: MatrixActivity[];
+    };
+    type MatrixRow = {
+      rowId: string; programId: string; programCode: string; programName: string; kind: string; targetName: string; groupType: string;
+      grouped: boolean; assetId: string | null; assetCode: string; assetName: string; assetCount: number; areaName: string; categoryName: string;
+      criticality: string; frequency: string; responsible: string | null; total: number; executed: number; months: MatrixCell[][];
+    };
+    const CRIT_ORDER = ['CRITICA', 'ALTA', 'MEDIA', 'BAJA'];
+    const groupInfo = (a: Item) => {
+      const p = a.program;
+      if (p.targetType === 'GRUPO') return { key: `p:${p.id}`, name: p.group?.name ?? p.name, type: 'Grupo personalizado' };
+      if (p.targetType === 'SUBCATEGORIA') return { key: `p:${p.id}`, name: p.subcategory?.name ?? p.name, type: 'Subcategoría' };
+      if (p.targetType === 'CATEGORIA') return { key: `p:${p.id}`, name: p.category?.name ?? p.name, type: 'Categoría' };
+      const snap = a.programSnapshot as Record<string, string | undefined>;
+      const sub = a.asset.subcategory;
+      return {
+        key: `a:${sub ? `s${sub.id}` : `c${a.asset.category.id}`}|${p.kind}|${snap.frequencyLabel ?? p.frequencyType}`,
+        name: sub?.name ?? a.asset.category.name,
+        type: sub ? 'Subcategoría (equipos individuales)' : 'Categoría (equipos individuales)',
+      };
+    };
+
+    const rows = new Map<string, MatrixRow & { assetIds: Set<string>; names: Set<string>; responsibles: Set<string>; areas: Set<string>; categories: Set<string>; raw: (MatrixActivity & { date: string; day: number; executed: boolean })[][] }>();
     for (const a of items) {
-      let r = rows.get(a.programId);
+      if (Number(a.committedDate.slice(0, 4)) !== year) continue;
+      const snap = a.programSnapshot as Record<string, string | undefined>;
+      const g = groupInfo(a);
+      const rowId = view === 'grupos' ? g.key : `${a.programId}|${a.asset.id}`;
+      let r = rows.get(rowId);
       if (!r) {
-        const snap = a.programSnapshot as Record<string, string>;
         r = {
-          programId: a.programId, programCode: a.program.code, programName: a.program.name, assetId: a.asset.id,
-          assetCode: a.asset.code, assetName: a.asset.name, areaName: a.asset.area.name, categoryName: a.asset.category.name,
-          criticality: a.asset.criticality, frequency: snap.frequencyLabel ?? '', responsible: a.responsible?.fullName ?? null,
-          months: Array.from({ length: 12 }, () => []),
+          rowId, programId: a.programId, programCode: a.program.code, programName: a.program.name, kind: a.program.kind,
+          targetName: g.name, groupType: g.type, grouped: view === 'grupos',
+          assetId: view === 'grupos' ? null : a.asset.id, assetCode: view === 'grupos' ? '' : a.asset.code, assetName: view === 'grupos' ? '' : a.asset.name,
+          assetCount: 0, areaName: a.asset.area.name, categoryName: a.asset.category.name, criticality: a.asset.criticality,
+          frequency: snap.frequencyLabel ?? '', responsible: null, total: 0, executed: 0, months: [],
+          assetIds: new Set(), names: new Set(), responsibles: new Set(), areas: new Set(), categories: new Set(),
+          raw: Array.from({ length: 12 }, () => []),
         };
-        rows.set(a.programId, r);
+        rows.set(rowId, r);
       }
-      const m = Number(a.committedDate.slice(5, 7)) - 1;
-      if (Number(a.committedDate.slice(0, 4)) === year) {
-        r.months[m].push({ id: a.id, day: Number(a.committedDate.slice(8, 10)), date: a.committedDate, status: a.displayStatus, rescheduled: a.rescheduled, originalDate: a.originalDate });
-      }
+      r.assetIds.add(a.asset.id);
+      r.names.add(a.program.name);
+      if (a.responsible?.fullName) r.responsibles.add(a.responsible.fullName);
+      r.areas.add(a.asset.area.name);
+      r.categories.add(a.asset.category.name);
+      if (CRIT_ORDER.indexOf(a.asset.criticality) < CRIT_ORDER.indexOf(r.criticality)) r.criticality = a.asset.criticality;
+      r.total++;
+      if (a.status === 'EJECUTADO') r.executed++;
+      r.raw[Number(a.committedDate.slice(5, 7)) - 1].push({
+        id: a.id, assetId: a.asset.id, assetCode: a.asset.code, assetName: a.asset.name, status: a.displayStatus,
+        rescheduled: a.rescheduled, originalDate: a.originalDate, date: a.committedDate, day: Number(a.committedDate.slice(8, 10)),
+        executed: a.status === 'EJECUTADO',
+      });
     }
-    return { planId: plan.id, planStatus: plan.status, version: plan.version, year, today, rows: [...rows.values()] };
+
+    const kindLabel: Record<string, string> = { PREVENTIVO: 'preventivo', CORRECTIVO: 'correctivo', INSPECCION: 'de inspección', CALIBRACION: 'de calibración', VERIFICACION_METROLOGICA: 'de verificación técnica', LIMPIEZA: 'de limpieza', PRUEBA_FUNCIONAL: 'de prueba funcional', OTRO: '' };
+    const result: MatrixRow[] = [...rows.values()].map(({ assetIds, names, responsibles, areas, categories, raw, ...r }) => {
+      r.assetCount = assetIds.size;
+      if (r.grouped && names.size > 1) r.programName = `Mantenimiento ${kindLabel[r.kind] ?? ''}`.trim();
+      r.responsible = responsibles.size === 0 ? null : responsibles.size === 1 ? [...responsibles][0] : 'Varios responsables';
+      if (areas.size > 1) r.areaName = 'Varias áreas';
+      if (categories.size > 1) r.categoryName = 'Varias categorías';
+      r.months = raw.map((month) => {
+        const byDate = new Map<string, typeof month>();
+        for (const x of month) byDate.set(x.date, [...(byDate.get(x.date) ?? []), x]);
+        return [...byDate.values()]
+          .sort((p, q) => p[0].date.localeCompare(q[0].date))
+          .map((acts) => {
+            const statuses = acts.map((x) => x.status);
+            return {
+              id: acts[0].id, day: acts[0].day, date: acts[0].date,
+              status: summarizeStatus(statuses), mixed: new Set(statuses).size > 1,
+              rescheduled: acts.some((x) => x.rescheduled), originalDate: acts[0].originalDate,
+              count: acts.length, executed: acts.filter((x) => x.executed).length,
+              activities: acts.map(({ id, assetId, assetCode, assetName, status, rescheduled, originalDate }) => ({ id, assetId, assetCode, assetName, status, rescheduled, originalDate })),
+            };
+          });
+      });
+      return r;
+    });
+    result.sort((p, q) => p.targetName.localeCompare(q.targetName, 'es') || p.programName.localeCompare(q.programName, 'es') || p.assetCode.localeCompare(q.assetCode));
+
+    const monthTotals = Array.from({ length: 12 }, (_, i) => ({
+      total: result.reduce((s, r) => s + r.months[i].reduce((c, x) => c + x.count, 0), 0),
+      executed: result.reduce((s, r) => s + r.months[i].reduce((c, x) => c + x.executed, 0), 0),
+    }));
+    return {
+      planId: plan.id, planStatus: plan.status, version: plan.version, year, today, view,
+      scheduleType: f.scheduleType ?? null,
+      assetCount: new Set(items.map((a) => a.asset.id)).size,
+      total: result.reduce((s, r) => s + r.total, 0),
+      executed: result.reduce((s, r) => s + r.executed, 0),
+      monthTotals,
+      rows: result,
+    };
   }
 
   async summary(ctx: ReqCtx, year: number, f: ActivityFilters = {}) {
