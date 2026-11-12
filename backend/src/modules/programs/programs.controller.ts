@@ -24,6 +24,8 @@ const ProgramShape = z.object({
   displayMode: DISPLAY.default('POR_ACTIVO'),
   assetId: z.string().uuid().optional(),
   categoryId: z.string().uuid().optional(),
+  /** Programa por categoría que abarca varias: la primera es la principal */
+  categoryIds: z.array(z.string().uuid()).min(1).max(20).optional(),
   subcategoryId: z.string().uuid().optional(),
   groupId: z.string().uuid().optional(),
   kind: KIND.default('PREVENTIVO'),
@@ -52,7 +54,7 @@ const ProgramShape = z.object({
 });
 const ProgramBase = ProgramShape.superRefine((b, ctx) => {
   const targetId = b.targetType === 'ACTIVO' ? b.assetId
-    : b.targetType === 'CATEGORIA' ? b.categoryId
+    : b.targetType === 'CATEGORIA' ? b.categoryId ?? b.categoryIds?.[0]
       : b.targetType === 'SUBCATEGORIA' ? b.subcategoryId : b.groupId;
   if (!targetId) ctx.addIssue({ code: 'custom', message: 'Seleccione el activo o agrupación que recibirá este programa' });
   if (b.targetType === 'SUBCATEGORIA' && !b.categoryId) ctx.addIssue({ code: 'custom', message: 'Seleccione la categoría de la subcategoría' });
@@ -84,7 +86,7 @@ const ProgramQuery = z.object({
 });
 
 const RULE_FIELDS = ['frequencyType', 'intervalValue', 'intervalUnit', 'specificDates', 'monthsOfYear', 'weekOfMonth', 'dayOfWeek', 'startDate', 'baseDate', 'endDate'] as const;
-type ProgramTarget = { assetId?: string | null; categoryId?: string | null; subcategoryId?: string | null; groupId?: string | null };
+type ProgramTarget = { assetId?: string | null; categoryId?: string | null; categoryIds?: string[]; subcategoryId?: string | null; groupId?: string | null };
 
 @ApiTags('Plan maestro de mantenimiento')
 @Controller('programs')
@@ -106,6 +108,7 @@ export class ProgramsController {
           OR: [
             { targetType: 'ACTIVO', asset: { is: assetScope } },
             { targetType: 'CATEGORIA', category: { is: { assets: { some: assetScope } } } },
+            { targetType: 'CATEGORIA', extraCategories: { some: { category: { assets: { some: assetScope } } } } },
             { targetType: 'SUBCATEGORIA', subcategory: { is: { assets: { some: assetScope } } } },
             { targetType: 'GRUPO', group: { is: { assets: { some: { asset: assetScope } } } } },
           ],
@@ -114,6 +117,7 @@ export class ProgramsController {
           OR: [
             { targetType: 'ACTIVO' as const, assetId: q.assetId },
             { targetType: 'CATEGORIA' as const, category: { is: { assets: { some: { id: q.assetId } } } } },
+            { targetType: 'CATEGORIA' as const, extraCategories: { some: { category: { assets: { some: { id: q.assetId } } } } } },
             { targetType: 'SUBCATEGORIA' as const, subcategory: { is: { assets: { some: { id: q.assetId } } } } },
             { targetType: 'GRUPO' as const, group: { is: { assets: { some: { assetId: q.assetId } } } } },
           ],
@@ -122,6 +126,7 @@ export class ProgramsController {
           OR: [
             { asset: { is: { categoryId: q.categoryId } } },
             { categoryId: q.categoryId },
+            { extraCategories: { some: { categoryId: q.categoryId } } },
             { subcategory: { is: { categoryId: q.categoryId } } },
             { group: { is: { assets: { some: { asset: { categoryId: q.categoryId } } } } } },
           ],
@@ -140,6 +145,7 @@ export class ProgramsController {
             { asset: { is: { name: { contains: q.q, mode: 'insensitive' as const } } } },
             { asset: { is: { code: { contains: q.q, mode: 'insensitive' as const } } } },
             { category: { is: { name: { contains: q.q, mode: 'insensitive' as const } } } },
+            { extraCategories: { some: { category: { name: { contains: q.q, mode: 'insensitive' as const } } } } },
             { subcategory: { is: { name: { contains: q.q, mode: 'insensitive' as const } } } },
             { group: { is: { name: { contains: q.q, mode: 'insensitive' as const } } } },
           ],
@@ -152,6 +158,7 @@ export class ProgramsController {
         include: {
           asset: { select: { id: true, code: true, name: true, status: true, criticality: true, area: { select: { id: true, name: true } } } },
           category: { select: { id: true, name: true, _count: { select: { assets: { where: { status: { notIn: INACTIVE_STATUSES } } } } } } },
+          extraCategories: { select: { category: { select: { id: true, name: true, _count: { select: { assets: { where: { status: { notIn: INACTIVE_STATUSES } } } } } } } } },
           subcategory: { select: { id: true, name: true, _count: { select: { assets: { where: { status: { notIn: INACTIVE_STATUSES } } } } } } },
           group: { select: { id: true, name: true, assets: { where: { asset: { status: { notIn: INACTIVE_STATUSES } } }, select: { assetId: true } } } },
           responsible: { select: { id: true, fullName: true } },
@@ -174,6 +181,7 @@ export class ProgramsController {
       include: {
         asset: { select: { id: true, code: true, name: true, areaId: true, status: true, criticality: true, subcategoryId: true } },
         category: { select: { id: true, name: true, _count: { select: { assets: { where: { status: { notIn: INACTIVE_STATUSES } } } } } } },
+        extraCategories: { select: { category: { select: { id: true, name: true, _count: { select: { assets: { where: { status: { notIn: INACTIVE_STATUSES } } } } } } } } },
         subcategory: { select: { id: true, name: true, _count: { select: { assets: { where: { status: { notIn: INACTIVE_STATUSES } } } } } } },
         group: { select: { id: true, name: true, assets: { where: { asset: { status: { notIn: INACTIVE_STATUSES } } }, select: { assetId: true } } } },
         responsible: { select: { id: true, fullName: true } }, supplier: { select: { id: true, name: true } },
@@ -204,11 +212,13 @@ export class ProgramsController {
     return this.prisma.$transaction(async (tx) => {
       const target = await this.resolveTarget(ctx, b.targetType, b, tx);
       const n = await this.counters.next(tx, 'PROGRAM', 0);
+      const { extraCategoryIds, ...targetCols } = target;
       const p = await tx.maintenanceProgram.create({
         data: {
           targetType: b.targetType,
           displayMode: b.targetType === 'ACTIVO' ? 'POR_ACTIVO' : b.displayMode,
-          ...target,
+          ...targetCols,
+          ...(extraCategoryIds.length ? { extraCategories: { create: extraCategoryIds.map((categoryId) => ({ categoryId })) } } : {}),
           kind: b.kind,
           name: b.name,
           description: b.description,
@@ -236,7 +246,7 @@ export class ProgramsController {
           createdById: ctx.user.id,
         },
       });
-      await this.audit.log(ctx, { action: 'CREAR', module: 'programas', entity: 'MaintenanceProgram', entityId: p.id, after: p }, tx);
+      await this.audit.log(ctx, { action: 'CREAR', module: 'programas', entity: 'MaintenanceProgram', entityId: p.id, after: { ...p, extraCategoryIds } }, tx);
       return p;
     });
   }
@@ -251,7 +261,7 @@ export class ProgramsController {
   @ApiZBody(ProgramUpdate)
   async update(@Ctx() ctx: ReqCtx, @Param('id', ParseUUIDPipe) id: string, @ZBody(ProgramUpdate) b: z.infer<typeof ProgramUpdate>) {
     return this.prisma.$transaction(async (tx) => {
-      const before = await tx.maintenanceProgram.findUnique({ where: { id } });
+      const before = await tx.maintenanceProgram.findUnique({ where: { id }, include: { extraCategories: { select: { categoryId: true } } } });
       if (!before) throw new NotFoundException('Programa no encontrado');
       await this.assertTargetAccess(ctx, before);
       const merged = {
@@ -274,7 +284,7 @@ export class ProgramsController {
         return JSON.stringify(b[k]) !== JSON.stringify(old);
       });
       if (ruleChanged && !b.changeReason) throw new BadRequestException('Indique el motivo del cambio de periodicidad (changeReason)');
-      const targetChanged = b.targetType !== undefined || b.assetId !== undefined || b.categoryId !== undefined || b.subcategoryId !== undefined || b.groupId !== undefined;
+      const targetChanged = b.targetType !== undefined || b.assetId !== undefined || b.categoryId !== undefined || b.categoryIds !== undefined || b.subcategoryId !== undefined || b.groupId !== undefined;
       const targetType = b.targetType ?? before.targetType;
       if (targetType === 'ACTIVO' && b.displayMode === 'AGRUPADO') {
         throw new BadRequestException('La vista agrupada requiere una categoría o agrupación');
@@ -284,20 +294,23 @@ export class ProgramsController {
         targetData = await this.resolveTarget(ctx, targetType, {
           assetId: b.assetId,
           categoryId: b.categoryId,
+          categoryIds: b.categoryIds,
           subcategoryId: b.subcategoryId,
           groupId: b.groupId,
         }, tx);
         const sameTarget = targetType === before.targetType &&
           targetData.assetId === before.assetId && targetData.categoryId === before.categoryId &&
-          targetData.subcategoryId === before.subcategoryId && targetData.groupId === before.groupId;
+          targetData.subcategoryId === before.subcategoryId && targetData.groupId === before.groupId &&
+          [...targetData.extraCategoryIds].sort().join() === before.extraCategories.map((c) => c.categoryId).sort().join();
         if (!sameTarget && await tx.scheduledActivity.count({ where: { programId: id } })) {
           throw new ConflictException('No se puede cambiar el alcance de un programa que ya tiene actividades; cree uno nuevo.');
         }
       }
-      const { changeReason: _changeReason, assetId: _assetId, categoryId: _categoryId, subcategoryId: _subcategoryId, groupId: _groupId, targetType: _targetType, ...fields } = b;
+      const { changeReason: _changeReason, assetId: _assetId, categoryId: _categoryId, categoryIds: _categoryIds, subcategoryId: _subcategoryId, groupId: _groupId, targetType: _targetType, ...fields } = b;
+      const { extraCategoryIds, ...targetCols } = targetData ?? { extraCategoryIds: null };
       const data: Prisma.MaintenanceProgramUncheckedUpdateInput = {
         ...fields,
-        ...(targetData ? { targetType, ...targetData } : {}),
+        ...(targetData ? { targetType, ...targetCols } : {}),
         displayMode: b.displayMode ?? (targetType === 'ACTIVO' ? 'POR_ACTIVO' : undefined),
         startDate: b.startDate ? parseYmd(b.startDate) : undefined,
         baseDate: b.baseDate ? parseYmd(b.baseDate) : undefined,
@@ -312,6 +325,10 @@ export class ProgramsController {
         version: ruleChanged ? before.version + 1 : undefined,
       };
       const after = await tx.maintenanceProgram.update({ where: { id }, data });
+      if (extraCategoryIds) {
+        await tx.maintenanceProgramCategory.deleteMany({ where: { programId: id } });
+        if (extraCategoryIds.length) await tx.maintenanceProgramCategory.createMany({ data: extraCategoryIds.map((categoryId) => ({ programId: id, categoryId })) });
+      }
       await this.audit.log(ctx, { action: ruleChanged ? 'CAMBIO_PERIODICIDAD' : 'EDITAR', module: 'programas', entity: 'MaintenanceProgram', entityId: id, ...diff(before, after), reason: b.changeReason ?? null }, tx);
       return after;
     });
@@ -335,7 +352,8 @@ export class ProgramsController {
   private present<T extends Parameters<ProgramsController['rule']>[0] & {
     targetType: string;
     asset?: { name: string } | null;
-    category?: { name: string; _count?: { assets: number } } | null;
+    category?: { id?: string; name: string; _count?: { assets: number } } | null;
+    extraCategories?: { category: { id: string; name: string; _count?: { assets: number } } }[];
     subcategory?: { name: string; _count?: { assets: number } } | null;
     group?: { name: string; assets?: { assetId: string }[] } | null;
   }>(p: T) {
@@ -346,12 +364,13 @@ export class ProgramsController {
       nextDates = [];
     }
     const targetName = p.targetType === 'ACTIVO' ? p.asset?.name
-      : p.targetType === 'CATEGORIA' ? p.category?.name
+      : p.targetType === 'CATEGORIA' ? [p.category?.name, ...(p.extraCategories ?? []).map((x) => x.category.name)].filter(Boolean).join(' + ')
         : p.targetType === 'SUBCATEGORIA' ? p.subcategory?.name : p.group?.name;
     const assetCount = p.targetType === 'GRUPO' ? p.group?.assets?.length ?? 0
-      : p.targetType === 'CATEGORIA' ? p.category?._count?.assets
+      : p.targetType === 'CATEGORIA' ? (p.category?._count?.assets ?? 0) + (p.extraCategories ?? []).reduce((sum, x) => sum + (x.category._count?.assets ?? 0), 0)
         : p.targetType === 'SUBCATEGORIA' ? p.subcategory?._count?.assets : undefined;
-    return { ...p, targetName: targetName ?? null, assetCount, frequencyLabel: describeRule(this.rule(p)), occurrencesThisYear: nextDates.length };
+    const categoryIds = p.targetType === 'CATEGORIA' && p.category?.id ? [p.category.id, ...(p.extraCategories ?? []).map((x) => x.category.id)] : undefined;
+    return { ...p, categoryIds, targetName: targetName ?? null, assetCount, frequencyLabel: describeRule(this.rule(p)), occurrencesThisYear: nextDates.length };
   }
 
   private async resolveTarget(ctx: ReqCtx, targetType: z.infer<typeof TARGET>, target: ProgramTarget, tx: Tx) {
@@ -360,13 +379,15 @@ export class ProgramsController {
       if (!asset) throw new BadRequestException('Seleccione un activo existente');
       assertAreaAccess(ctx.user, asset.areaId);
       if (INACTIVE_STATUSES.includes(asset.status)) throw new ConflictException('No se pueden crear programas para activos retirados o dados de baja');
-      return { assetId: asset.id, categoryId: asset.categoryId, subcategoryId: asset.subcategoryId, groupId: null };
+      return { assetId: asset.id, categoryId: asset.categoryId, subcategoryId: asset.subcategoryId, groupId: null, extraCategoryIds: [] as string[] };
     }
     if (targetType === 'CATEGORIA') {
-      const category = target.categoryId ? await tx.assetCategory.findUnique({ where: { id: target.categoryId } }) : null;
-      if (!category?.isActive) throw new BadRequestException('Seleccione una categoría activa');
-      await this.assertSelectorAccess(ctx, { categoryId: category.id }, tx);
-      return { assetId: null, categoryId: category.id, subcategoryId: null, groupId: null };
+      const ids = [...new Set(target.categoryIds?.length ? target.categoryIds : target.categoryId ? [target.categoryId] : [])];
+      if (!ids.length) throw new BadRequestException('Seleccione al menos una categoría');
+      const categories = await tx.assetCategory.findMany({ where: { id: { in: ids } } });
+      if (categories.length !== ids.length || categories.some((c) => !c.isActive)) throw new BadRequestException('Seleccione categorías activas');
+      await this.assertSelectorAccess(ctx, { categoryId: { in: ids } }, tx);
+      return { assetId: null, categoryId: ids[0], subcategoryId: null, groupId: null, extraCategoryIds: ids.slice(1) };
     }
     if (targetType === 'SUBCATEGORIA') {
       const subcategory = target.subcategoryId ? await tx.assetSubcategory.findUnique({ where: { id: target.subcategoryId } }) : null;
@@ -374,14 +395,14 @@ export class ProgramsController {
         throw new BadRequestException('Seleccione una subcategoría activa de la categoría indicada');
       }
       await this.assertSelectorAccess(ctx, { subcategoryId: subcategory.id }, tx);
-      return { assetId: null, categoryId: subcategory.categoryId, subcategoryId: subcategory.id, groupId: null };
+      return { assetId: null, categoryId: subcategory.categoryId, subcategoryId: subcategory.id, groupId: null, extraCategoryIds: [] as string[] };
     }
     const group = target.groupId
       ? await tx.maintenanceGroup.findUnique({ where: { id: target.groupId }, include: { assets: { include: { asset: true } } } })
       : null;
     if (!group?.isActive || !group.assets.length) throw new BadRequestException('Seleccione una agrupación activa con activos');
     for (const member of group.assets) assertAreaAccess(ctx.user, member.asset.areaId);
-    return { assetId: null, categoryId: null, subcategoryId: null, groupId: group.id };
+    return { assetId: null, categoryId: null, subcategoryId: null, groupId: group.id, extraCategoryIds: [] as string[] };
   }
 
   /**
@@ -389,7 +410,7 @@ export class ProgramsController {
    * incluirá los que se registren después. Los usuarios limitados a sus áreas solo pueden programar
    * agrupaciones con al menos un equipo habilitado en esas áreas.
    */
-  private async assertSelectorAccess(ctx: ReqCtx, selector: { categoryId?: string; subcategoryId?: string }, tx: Tx) {
+  private async assertSelectorAccess(ctx: ReqCtx, selector: { categoryId?: string | { in: string[] }; subcategoryId?: string }, tx: Tx) {
     if (ctx.user.scope !== 'AREA') return;
     const asset = await tx.asset.findFirst({
       where: { ...areaFilter(ctx.user), ...selector, status: { notIn: INACTIVE_STATUSES } },
@@ -398,8 +419,15 @@ export class ProgramsController {
     if (!asset) throw new ForbiddenException('Sus áreas no tienen equipos habilitados en esta categoría o subcategoría');
   }
 
-  private async assertTargetAccess(ctx: ReqCtx, target: ProgramTarget & { targetType: string }) {
+  private async assertTargetAccess(ctx: ReqCtx, target: ProgramTarget & { targetType: string; id?: string }) {
     if (ctx.user.scope !== 'AREA') return;
+    if (target.targetType === 'CATEGORIA' && target.id) {
+      const extra = await this.prisma.maintenanceProgramCategory.findMany({ where: { programId: target.id }, select: { categoryId: true } });
+      const ids = [target.categoryId, ...extra.map((x) => x.categoryId)].filter((x): x is string => !!x);
+      const asset = await this.prisma.asset.findFirst({ where: { ...areaFilter(ctx.user), categoryId: { in: ids } }, select: { id: true } });
+      if (!asset) throw new ForbiddenException('No tiene acceso a activos de esta agrupación');
+      return;
+    }
     if (target.targetType === 'ACTIVO' && target.assetId) {
       const asset = await this.prisma.asset.findUnique({ where: { id: target.assetId }, select: { areaId: true } });
       if (!asset) throw new NotFoundException('Activo del programa no encontrado');

@@ -361,6 +361,34 @@ describe('4-6. Programas preventivos y generación del cronograma', () => {
     expect(p.status).toBe(201);
   });
 
+  it('un programa puede abarcar varias categorías y el cronograma lo muestra como un solo grupo', async () => {
+    const cats = ((await c.coord.get('/categories')).body as { id: string; name: string; assetCount: number }[]).filter((x) => x.assetCount > 0);
+    expect(cats.length).toBeGreaterThanOrEqual(2);
+    const [a, b] = cats;
+    const p = await c.coord.post('/programs', {
+      targetType: 'CATEGORIA', displayMode: 'AGRUPADO', categoryIds: [a.id, b.id], kind: 'LIMPIEZA',
+      name: 'Limpieza conjunta de cómputo y periféricos', frequencyType: 'ANUAL', startDate: `${YEAR}-01-01`, baseDate: `${YEAR}-09-10`,
+      frequencyJustification: 'Limpieza anual coordinada de varias categorías',
+    });
+    expect(p.status).toBe(201);
+    const detail = (await c.coord.get(`/programs/${p.body.id}`)).body;
+    expect(detail.categoryIds).toEqual([a.id, b.id]);
+    expect(detail.targetName).toBe(`${a.name} + ${b.name}`);
+    expect(detail.assetCount).toBe(a.assetCount + b.assetCount);
+
+    const g = await c.coord.post(`/plans/${YEAR}/generate`, { scheduleType: 'PREVENTIVO' });
+    expect(g.status).toBe(201);
+    const m = await c.coord.get(`/plans/${YEAR}/matrix?scheduleType=PREVENTIVO`);
+    const row = (m.body.rows as { programId: string; targetName: string; assetCount: number; groupType: string }[]).find((r) => r.programId === p.body.id)!;
+    expect(row).toMatchObject({ targetName: `${a.name} + ${b.name}`, groupType: 'Categorías', assetCount: a.assetCount + b.assetCount });
+
+    // No se puede cambiar el alcance de un programa que ya tiene actividades
+    const change = await c.coord.patch(`/programs/${p.body.id}`, { categoryIds: [a.id] });
+    expect(change.status).toBe(409);
+    // Se desactiva para no alterar los conteos de las pruebas siguientes
+    expect((await c.coord.patch(`/programs/${p.body.id}`, { isActive: false })).status).toBe(200);
+  });
+
   it('cronograma correctivo: se genera por separado sin excluir el preventivo y la vista por grupos consolida filas', async () => {
     const p = await c.coord.post('/programs', {
       assetId: ids.asset_UPS, kind: 'CORRECTIVO', name: 'Cambio programado de baterías', frequencyType: 'ANUAL',

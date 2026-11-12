@@ -51,7 +51,7 @@ onMounted(async () => {
 // ---------------- Formulario
 type CL = { id: string; text: string; required: boolean };
 const empty = () => ({
-  id: '' as string, targetType: 'CATEGORIA', displayMode: 'AGRUPADO', assetId: null as string | null, categoryId: null as string | null,
+  id: '' as string, targetType: 'CATEGORIA', displayMode: 'AGRUPADO', assetId: null as string | null, categoryId: null as string | null, categoryIds: [] as string[],
   subcategoryId: null as string | null, groupId: null as string | null, kind: 'PREVENTIVO', name: '', description: '', procedure: '', checklist: [] as CL[],
   frequencyType: 'SEMANA_DEL_MES', intervalValue: null as number | null, intervalUnit: null as string | null, specificDates: [] as string[],
   monthsOfYear: Array.from({ length: 12 }, (_, i) => i + 1), weekOfMonth: 1 as number | null, dayOfWeek: 1 as number | null,
@@ -71,7 +71,7 @@ function openNew(assetId?: string, scheduleType: 'PREVENTIVO' | 'CORRECTIVO' = (
   form.value = {
     ...empty(), targetType: assetId ? 'ACTIVO' : 'SUBCATEGORIA', displayMode: assetId ? 'POR_ACTIVO' : 'AGRUPADO',
     kind: scheduleType === 'CORRECTIVO' ? 'CORRECTIVO' : 'PREVENTIVO',
-    assetId: assetId ?? null, categoryId: cat.categories.find((c) => c.isActive)?.id ?? null,
+    assetId: assetId ?? null, categoryId: cat.categories.find((c) => c.isActive)?.id ?? null, categoryIds: [],
     frequencyType: assetId ? 'SEMESTRAL' : 'SEMANA_DEL_MES',
     startDate: ymdToDate(`${cat.year}-01-01`), baseDate: ymdToDate(`${cat.year}-01-15`),
   };
@@ -84,7 +84,7 @@ async function openEdit(id: string) {
   original.value = p;
   form.value = {
     ...empty(), ...p, targetType: p.targetType ?? 'ACTIVO', displayMode: p.displayMode ?? 'POR_ACTIVO',
-    assetId: p.assetId ?? null, categoryId: p.categoryId ?? null, subcategoryId: p.subcategoryId ?? null, groupId: p.groupId ?? null,
+    assetId: p.assetId ?? null, categoryId: p.categoryId ?? null, categoryIds: p.categoryIds ?? (p.targetType === 'CATEGORIA' && p.categoryId ? [p.categoryId] : []), subcategoryId: p.subcategoryId ?? null, groupId: p.groupId ?? null,
     monthsOfYear: p.monthsOfYear ?? [], weekOfMonth: p.weekOfMonth ?? null, dayOfWeek: p.dayOfWeek ?? null,
     checklist: p.checklist ?? [], startDate: ymdToDate(p.startDate), baseDate: ymdToDate(p.baseDate),
     endDate: ymdToDate(p.endDate), lastPerformedDate: ymdToDate(p.lastPerformedDate), description: p.description ?? '', procedure: p.procedure ?? '',
@@ -118,7 +118,8 @@ async function save() {
   const body: Record<string, unknown> = {
     targetType: fv.targetType, displayMode: fv.targetType === 'ACTIVO' ? 'POR_ACTIVO' : fv.displayMode,
     ...(fv.targetType === 'ACTIVO' ? { assetId: fv.assetId } : {}),
-    ...(fv.targetType === 'CATEGORIA' || fv.targetType === 'SUBCATEGORIA' ? { categoryId: fv.categoryId } : {}),
+    ...(fv.targetType === 'CATEGORIA' ? { categoryIds: fv.categoryIds } : {}),
+    ...(fv.targetType === 'SUBCATEGORIA' ? { categoryId: fv.categoryId } : {}),
     ...(fv.targetType === 'SUBCATEGORIA' ? { subcategoryId: fv.subcategoryId } : {}),
     ...(fv.targetType === 'GRUPO' ? { groupId: fv.groupId } : {}),
     kind: fv.kind, name: fv.name, description: fv.description, procedure: fv.procedure, checklist: fv.checklist,
@@ -148,14 +149,14 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
 const groupAssetOptions = computed(() => cat.assets
   .filter((asset) => asset.status !== 'RETIRADO' && asset.status !== 'DADO_DE_BAJA')
   .map((asset) => ({ ...asset, label: assetLabel(asset) })));
-const targetTypeLabels: Record<string, string> = { ACTIVO: 'Activo individual', CATEGORIA: 'Categoría', SUBCATEGORIA: 'Subcategoría', GRUPO: 'Grupo personalizado' };
+const targetTypeLabels: Record<string, string> = { ACTIVO: 'Activo individual', CATEGORIA: 'Categorías', SUBCATEGORIA: 'Subcategoría', GRUPO: 'Grupo personalizado' };
 const assetTargetLabel = (p: Record<string, any>) => p.targetType === 'ACTIVO'
   ? `${p.asset?.code ?? ''} · ${p.asset?.name ?? p.targetName ?? ''}`
   : `${p.targetName ?? 'Agrupación'}${p.assetCount ? ` · ${p.assetCount} activos` : ''}`;
 const targetValid = computed(() => {
   const fv = form.value;
   return fv.targetType === 'ACTIVO' ? !!fv.assetId
-    : fv.targetType === 'CATEGORIA' ? !!fv.categoryId
+    : fv.targetType === 'CATEGORIA' ? fv.categoryIds.length > 0
       : fv.targetType === 'SUBCATEGORIA' ? !!fv.categoryId && !!fv.subcategoryId
         : !!fv.groupId;
 });
@@ -184,6 +185,7 @@ const setTargetType = (targetType: string) => {
   form.value.targetType = targetType;
   form.value.assetId = null;
   form.value.categoryId = null;
+  form.value.categoryIds = [];
   form.value.subcategoryId = null;
   form.value.groupId = null;
   form.value.displayMode = targetType === 'ACTIVO' ? 'POR_ACTIVO' : 'AGRUPADO';
@@ -198,6 +200,10 @@ const withCount = (o: { name: string; assetCount?: number }) => o.assetCount ===
 const selectedTargetCount = computed(() => {
   const c = cat.categories.find((x) => x.id === form.value.categoryId);
   if (form.value.targetType === 'SUBCATEGORIA') return c?.subcategories.find((s) => s.id === form.value.subcategoryId)?.assetCount;
+  if (form.value.targetType === 'CATEGORIA') {
+    if (!form.value.categoryIds.length) return undefined;
+    return cat.categories.filter((x) => form.value.categoryIds.includes(x.id)).reduce((sum, x) => sum + (x.assetCount ?? 0), 0);
+  }
   if (form.value.targetType === 'CATEGORIA') return c?.assetCount;
   return undefined;
 });
@@ -262,12 +268,13 @@ const weekdayOptions = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'S
           <small>{{ formSchedule === 'CORRECTIVO' ? 'Intervenciones correctivas planificadas (reparaciones, cambios de partes o reemplazos programados).' : 'Mantenimiento preventivo, inspecciones, limpiezas, calibraciones y pruebas.' }}</small>
         </div>
         <div class="field full"><label>Alcance del programa <span class="req">*</span></label>
-          <Select :model-value="form.targetType" :options="[{ label: 'Activo individual', value: 'ACTIVO' }, { label: 'Categoría', value: 'CATEGORIA' }, { label: 'Subcategoría', value: 'SUBCATEGORIA' }, { label: 'Agrupación personalizada', value: 'GRUPO' }]" option-label="label" option-value="value" :disabled="!!form.id && !!original" @update:model-value="setTargetType" />
+          <Select :model-value="form.targetType" :options="[{ label: 'Activo individual', value: 'ACTIVO' }, { label: 'Una o varias categorías', value: 'CATEGORIA' }, { label: 'Subcategoría', value: 'SUBCATEGORIA' }, { label: 'Agrupación personalizada', value: 'GRUPO' }]" option-label="label" option-value="value" :disabled="!!form.id && !!original" @update:model-value="setTargetType" />
           <small>Recomendado: subcategoría o agrupación, para que el cronograma salga en una fila por grupo. Las categorías y subcategorías incluyen automáticamente sus equipos habilitados.</small>
         </div>
         <div v-if="form.targetType === 'ACTIVO'" class="field full"><label>Activo <span class="req">*</span></label><Select v-model="form.assetId" :options="cat.assets" :option-label="assetLabel" option-value="id" filter placeholder="Seleccione el equipo o sistema" :disabled="!!form.id" /></div>
         <template v-if="form.targetType === 'CATEGORIA' || form.targetType === 'SUBCATEGORIA'">
-          <div class="field"><label>Categoría <span class="req">*</span></label><Select v-model="form.categoryId" :options="cat.categories.filter((c) => c.isActive)" :option-label="withCount" option-value="id" filter placeholder="Seleccione una categoría" /></div>
+          <div v-if="form.targetType === 'CATEGORIA'" class="field full"><label>Categorías <span class="req">*</span></label><MultiSelect v-model="form.categoryIds" :options="cat.categories.filter((c) => c.isActive)" :option-label="withCount" option-value="id" filter display="chip" placeholder="Seleccione una o varias categorías" data-testid="program-categories" /><small>Puede combinar varias, por ejemplo Equipos de cómputo + Impresión y periféricos: el cronograma las muestra como un solo grupo<template v-if="selectedTargetCount !== undefined"> · {{ selectedTargetCount }} equipo(s) en total</template>.</small></div>
+          <div v-else class="field"><label>Categoría <span class="req">*</span></label><Select v-model="form.categoryId" :options="cat.categories.filter((c) => c.isActive)" :option-label="withCount" option-value="id" filter placeholder="Seleccione una categoría" /></div>
           <div v-if="form.targetType === 'SUBCATEGORIA'" class="field"><label>Subcategoría <span class="req">*</span></label><Select v-model="form.subcategoryId" :options="cat.categories.find((c) => c.id === form.categoryId)?.subcategories.filter((s) => s.isActive) ?? []" :option-label="withCount" option-value="id" filter placeholder="Seleccione una subcategoría" /></div>
           <Message v-if="selectedTargetCount === 0" severity="warn" :closable="false" class="field full">Esta agrupación aún no tiene equipos: el programa se guarda, pero no generará actividades hasta que se registren equipos en ella.</Message>
         </template>

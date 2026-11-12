@@ -226,16 +226,17 @@ model Location {
 // ----------------------------------------------------------------------------
 
 model AssetCategory {
-  id            String               @id @default(uuid()) @db.Uuid
-  code          String               @unique
-  name          String               @unique
+  id            String                       @id @default(uuid()) @db.Uuid
+  code          String                       @unique
+  name          String                       @unique
   description   String?
   color         String?
-  isActive      Boolean              @default(true)
-  createdAt     DateTime             @default(now()) @db.Timestamptz(6)
+  isActive      Boolean                      @default(true)
+  createdAt     DateTime                     @default(now()) @db.Timestamptz(6)
   subcategories AssetSubcategory[]
   assets        Asset[]
   programs      MaintenanceProgram[]
+  programLinks  MaintenanceProgramCategory[]
 
   @@map("asset_categories")
 }
@@ -601,20 +602,35 @@ model MaintenanceProgram {
   createdById            String             @db.Uuid
   updatedAt              DateTime           @updatedAt @db.Timestamptz(6)
 
-  asset       Asset?              @relation(fields: [assetId], references: [id], onDelete: Restrict)
-  category    AssetCategory?      @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  subcategory AssetSubcategory?   @relation(fields: [subcategoryId], references: [id], onDelete: Restrict)
-  group       MaintenanceGroup?   @relation(fields: [groupId], references: [id], onDelete: Restrict)
-  responsible User?               @relation("ProgramResponsible", fields: [responsibleId], references: [id])
-  supplier    Supplier?           @relation(fields: [supplierId], references: [id])
-  activities  ScheduledActivity[]
-  createdBy   User                @relation("ProgramCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  asset           Asset?                       @relation(fields: [assetId], references: [id], onDelete: Restrict)
+  category        AssetCategory?               @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  subcategory     AssetSubcategory?            @relation(fields: [subcategoryId], references: [id], onDelete: Restrict)
+  group           MaintenanceGroup?            @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  responsible     User?                        @relation("ProgramResponsible", fields: [responsibleId], references: [id])
+  supplier        Supplier?                    @relation(fields: [supplierId], references: [id])
+  activities      ScheduledActivity[]
+  /// Categorías adicionales cuando el programa abarca varias (la principal es categoryId)
+  extraCategories MaintenanceProgramCategory[]
+  createdBy       User                         @relation("ProgramCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
 
   @@index([assetId])
   @@index([targetType, categoryId, subcategoryId])
   @@index([groupId])
   @@index([isActive])
   @@map("maintenance_programs")
+}
+
+/// Categorías adicionales de un programa por categoría (p. ej. Equipos de cómputo + Impresión y periféricos)
+model MaintenanceProgramCategory {
+  programId  String @db.Uuid
+  categoryId String @db.Uuid
+
+  program  MaintenanceProgram @relation(fields: [programId], references: [id], onDelete: Cascade)
+  category AssetCategory      @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  @@id([programId, categoryId])
+  @@index([categoryId])
+  @@map("maintenance_program_categories")
 }
 
 // ----------------------------------------------------------------------------

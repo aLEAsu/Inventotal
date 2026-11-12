@@ -49,6 +49,11 @@ export function scheduleKindWhere(scheduleType?: ScheduleType | null): Prisma.Ma
   return {};
 }
 
+/** Categorías que cubre un programa por categoría: la principal y las adicionales */
+export function programCategoryIds(p: { categoryId: string | null; extraCategories?: { category: { id: string } }[] }): string[] {
+  return [p.categoryId, ...(p.extraCategories ?? []).map((x) => x.category.id)].filter((x): x is string => !!x);
+}
+
 export const SCHEDULE_TYPE_LABEL: Record<ScheduleType, string> = { PREVENTIVO: 'Preventivo', CORRECTIVO: 'Correctivo' };
 
 /** Prioridad para resumir el estado de varias actividades en una celda agrupada (la más urgente primero) */
@@ -156,6 +161,7 @@ export class PlansService {
           include: {
             asset: { select: { id: true, status: true } },
             category: { select: { id: true, name: true } },
+            extraCategories: { select: { category: { select: { id: true, name: true } } } },
             subcategory: { select: { id: true, name: true } },
             group: { select: { id: true, name: true, isActive: true, assets: { select: { assetId: true } } } },
             supplier: { select: { name: true } },
@@ -164,7 +170,7 @@ export class PlansService {
         const targetClauses: Prisma.AssetWhereInput[] = [];
         for (const p of programs) {
           if (p.targetType === 'ACTIVO' && p.assetId) targetClauses.push({ id: p.assetId });
-          if (p.targetType === 'CATEGORIA' && p.categoryId) targetClauses.push({ categoryId: p.categoryId });
+          if (p.targetType === 'CATEGORIA' && p.categoryId) targetClauses.push({ categoryId: { in: programCategoryIds(p) } });
           if (p.targetType === 'SUBCATEGORIA' && p.subcategoryId) targetClauses.push({ subcategoryId: p.subcategoryId });
           if (p.targetType === 'GRUPO' && p.group?.isActive && p.group.assets.length) {
             targetClauses.push({ id: { in: p.group.assets.map((m) => m.assetId) } });
@@ -179,7 +185,10 @@ export class PlansService {
         const assetsByProgram = new Map(programs.map((p) => {
           let matches = targetAssets;
           if (p.targetType === 'ACTIVO') matches = targetAssets.filter((a) => a.id === p.assetId);
-          if (p.targetType === 'CATEGORIA') matches = targetAssets.filter((a) => a.categoryId === p.categoryId);
+          if (p.targetType === 'CATEGORIA') {
+            const ids = new Set(programCategoryIds(p));
+            matches = targetAssets.filter((a) => ids.has(a.categoryId));
+          }
           if (p.targetType === 'SUBCATEGORIA') matches = targetAssets.filter((a) => a.subcategoryId === p.subcategoryId);
           if (p.targetType === 'GRUPO') {
             const ids = new Set(p.group?.isActive ? p.group.assets.map((m) => m.assetId) : []);
@@ -270,7 +279,7 @@ export class PlansService {
             continue;
           }
           const targetName = p.targetType === 'ACTIVO' ? p.name
-            : p.targetType === 'CATEGORIA' ? p.category?.name
+            : p.targetType === 'CATEGORIA' ? [p.category?.name, ...p.extraCategories.map((x) => x.category.name)].filter(Boolean).join(' + ')
               : p.targetType === 'SUBCATEGORIA' ? p.subcategory?.name : p.group?.name;
           for (const asset of assetsByProgram.get(p.id) ?? []) {
             if (approved && assetsWithActs.has(`${p.id}|${asset.id}`)) continue;
@@ -527,7 +536,7 @@ export class PlansService {
       where,
       include: {
         asset: { select: { id: true, code: true, name: true, criticality: true, area: { select: { id: true, name: true } }, category: { select: { id: true, name: true } }, subcategory: { select: { id: true, name: true } }, location: { select: { name: true } } } },
-        program: { select: { id: true, code: true, name: true, kind: true, targetType: true, frequencyType: true, intervalValue: true, intervalUnit: true, specificDates: true, displayMode: true, group: { select: { name: true } }, category: { select: { name: true } }, subcategory: { select: { name: true } } } },
+        program: { select: { id: true, code: true, name: true, kind: true, targetType: true, frequencyType: true, intervalValue: true, intervalUnit: true, specificDates: true, displayMode: true, group: { select: { name: true } }, category: { select: { name: true } }, extraCategories: { select: { category: { select: { name: true } } } }, subcategory: { select: { name: true } } } },
         responsible: { select: { id: true, fullName: true } },
         workOrder: { select: { code: true } },
       },
@@ -562,7 +571,10 @@ export class PlansService {
       const p = a.program;
       if (p.targetType === 'GRUPO') return { key: `p:${p.id}`, name: p.group?.name ?? p.name, type: 'Grupo personalizado' };
       if (p.targetType === 'SUBCATEGORIA') return { key: `p:${p.id}`, name: p.subcategory?.name ?? p.name, type: 'Subcategoría' };
-      if (p.targetType === 'CATEGORIA') return { key: `p:${p.id}`, name: p.category?.name ?? p.name, type: 'Categoría' };
+      if (p.targetType === 'CATEGORIA') {
+        const names = [p.category?.name, ...p.extraCategories.map((x) => x.category.name)].filter(Boolean);
+        return { key: `p:${p.id}`, name: names.join(' + ') || p.name, type: names.length > 1 ? 'Categorías' : 'Categoría' };
+      }
       const snap = a.programSnapshot as Record<string, string | undefined>;
       const sub = a.asset.subcategory;
       return {

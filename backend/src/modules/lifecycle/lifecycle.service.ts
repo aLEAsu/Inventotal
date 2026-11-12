@@ -28,12 +28,14 @@ export class LifecycleService {
           OR: [
             { assetId },
             { targetType: 'CATEGORIA', categoryId: asset.categoryId },
+            { targetType: 'CATEGORIA', extraCategories: { some: { categoryId: asset.categoryId } } },
             ...(asset.subcategoryId ? [{ targetType: 'SUBCATEGORIA' as const, subcategoryId: asset.subcategoryId }] : []),
             { targetType: 'GRUPO', group: { assets: { some: { assetId } } } },
           ],
         },
         include: {
           category: { select: { name: true } },
+          extraCategories: { select: { category: { select: { name: true } } } },
           subcategory: { select: { name: true } },
           group: { select: { name: true } },
           responsible: { select: { fullName: true } },
@@ -77,7 +79,7 @@ export class LifecycleService {
       asset,
       programs: programs.map((p) => ({
         ...p,
-        targetName: p.targetType === 'ACTIVO' ? asset.name : p.targetType === 'CATEGORIA' ? p.category?.name
+        targetName: p.targetType === 'ACTIVO' ? asset.name : p.targetType === 'CATEGORIA' ? [p.category?.name, ...p.extraCategories.map((x) => x.category.name)].filter(Boolean).join(' + ')
           : p.targetType === 'SUBCATEGORIA' ? p.subcategory?.name : p.group?.name,
         frequencyLabel: describeRule(p), startDate: fmtYmd(p.startDate), baseDate: fmtYmd(p.baseDate),
         lastPerformedDate: p.lastPerformedDate ? fmtYmd(p.lastPerformedDate) : null,
