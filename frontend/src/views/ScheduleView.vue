@@ -164,11 +164,12 @@ async function transition(action: 'submit' | 'review' | 'return' | 'approve' | '
   if (why === null) return;
   if (await n.run(() => http.post(`/plans/${year.value}/${action}`, { reason: why || null }), 'Estado del plan actualizado')) await reload();
 }
+const printRowOptions = [{ label: 'Una fila por categoría', value: 'grupos', icon: 'pi pi-th-large' }, { label: 'Una fila por equipo', value: 'equipos', icon: 'pi pi-list' }];
 /** Diálogo de salida: el usuario elige qué cronograma (todos los programas o uno) y en qué formato */
 const out = ref({ visible: false, programId: null as string | null, view: 'grupos' as 'grupos' | 'equipos' });
 const outPrograms = computed(() => [{ id: null as string | null, label: `Todos los programas ${typeLabel.value}s` }, ...schedulePrograms.value.map((x) => ({ id: x.id as string | null, label: programFilterLabel(x) }))]);
 function openOutput() {
-  out.value = { visible: true, programId: f.value.programId, view: view.value };
+  out.value = { visible: true, programId: f.value.programId, view: 'grupos' };
 }
 const outParams = () => {
   const q: Record<string, string> = { ...(params.value as Record<string, string>), view: out.value.view };
@@ -814,8 +815,11 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
           <small class="muted">Elija un programa del plan maestro para imprimir solo ese cronograma, o todos juntos.</small>
         </div>
         <div class="field full">
-          <label>Presentación</label>
-          <SelectButton v-model="out.view" :options="viewOptions" option-label="label" option-value="value" :allow-empty="false" />
+          <label>Filas del cronograma impreso</label>
+          <SelectButton v-model="out.view" :options="printRowOptions" option-label="label" option-value="value" :allow-empty="false" data-testid="out-rows">
+            <template #option="{ option }"><i :class="option.icon" /> <span>{{ option.label }}</span></template>
+          </SelectButton>
+          <small class="muted">{{ out.view === 'grupos' ? 'Cada categoría en su propia fila, con el número de equipos por fecha (cabe en una hoja).' : 'Cada equipo en su propia fila con sus fechas (puede ocupar varias hojas).' }}</small>
         </div>
       </div>
       <p v-if="activeFilterCount" class="muted small mt">Se conservan los demás filtros aplicados en pantalla ({{ activeFilterCount }}).</p>

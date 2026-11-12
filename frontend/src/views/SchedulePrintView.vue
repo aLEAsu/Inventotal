@@ -14,12 +14,13 @@ const route = useRoute();
 const auth = useAuth();
 const year = Number(route.params.year);
 const params = Object.fromEntries(Object.entries(route.query).filter(([, v]) => typeof v === 'string' && v)) as Record<string, string>;
-const view = params.view === 'equipos' ? 'equipos' : 'grupos';
-const grouped = view === 'grupos';
+/** Filas del cronograma impreso: una por categoría (grupos) o una por equipo; se puede cambiar antes de imprimir */
+const view = ref<'grupos' | 'equipos'>(params.view === 'equipos' ? 'equipos' : 'grupos');
+const grouped = computed(() => view.value === 'grupos');
 const typeLabel = params.scheduleType === 'CORRECTIVO' ? 'CORRECTIVO' : params.scheduleType === 'PREVENTIVO' ? 'PREVENTIVO' : '';
 const paper = ref<'A4' | 'A3'>('A4');
 // La hoja única aplica a la vista por grupos; la vista por equipo puede ocupar varias hojas
-const fit = ref(grouped);
+const fit = ref(grouped.value);
 const scale = ref(1);
 const overflow = ref(false);
 /** Por debajo de esta escala el texto deja de ser legible: se imprime en varias hojas */
@@ -77,7 +78,7 @@ async function fitToPage() {
 onMounted(async () => {
   try {
     const [p, m, st] = await Promise.all([
-      http.get(`/plans/${year}`), http.get(`/plans/${year}/matrix`, { params: { ...params, view, split: '1' } }), http.get('/settings/public'),
+      http.get(`/plans/${year}`), http.get(`/plans/${year}/matrix`, { params: { ...params, view: view.value, split: '1' } }), http.get('/settings/public'),
     ]);
     plan.value = p.data.plan;
     matrix.value = m.data;
@@ -90,6 +91,21 @@ onMounted(async () => {
   }
 });
 watch([paper, fit], fitToPage);
+/** Cambia las filas (categoría / equipo) recargando la matriz y conservando el enlace */
+watch(view, async (v) => {
+  try {
+    matrix.value = null;
+    const m = await http.get(`/plans/${year}/matrix`, { params: { ...params, view: v, split: '1' } });
+    matrix.value = m.data;
+    fit.value = v === 'grupos';
+    const url = new URL(window.location.href);
+    url.searchParams.set('view', v);
+    window.history.replaceState(window.history.state, '', url);
+    await fitToPage();
+  } catch {
+    error.value = 'No fue posible cargar el plan para impresión.';
+  }
+});
 const onResize = () => void fitToPage();
 onMounted(() => window.addEventListener('resize', onResize));
 onBeforeUnmount(() => window.removeEventListener('resize', onResize));
@@ -105,7 +121,7 @@ const filterText = computed(() => {
   return parts.join(' · ');
 });
 const pct = (a: number, b: number) => (b ? Math.round((a / b) * 100) : 0);
-const cellLabel = (x: Record<string, any>) => (grouped ? `${x.day}·${x.executed ? `${x.executed}/${x.count}` : x.count}${x.rescheduled ? 'R' : ''}` : `${x.day}${SYM[x.status] ?? ''}`);
+const cellLabel = (x: Record<string, any>) => (grouped.value ? `${x.day}·${x.executed ? `${x.executed}/${x.count}` : x.count}${x.rescheduled ? 'R' : ''}` : `${x.day}${SYM[x.status] ?? ''}`);
 const URGENCY = ['VENCIDO', 'PROXIMO', 'EN_EJECUCION', 'REPROGRAMADO', 'PROGRAMADO', 'EJECUTADO', 'CANCELADO', 'NO_APLICA'];
 /** Color del mes: el estado más urgente entre sus fechas (igual que la pantalla y el PDF) */
 const lastStatus = (cell: Record<string, any>[]) => (cell.length ? URGENCY.find((k) => cell.some((x) => x.status === k)) ?? cell[0].status : '');
@@ -116,6 +132,7 @@ const pageStyle = computed(() => `@page { size: ${paper.value} landscape; margin
   <component :is="'style'">{{ pageStyle }}</component>
   <div class="toolbar no-print">
     <strong>Vista de impresión</strong>
+    <label>Filas <select v-model="view" data-testid="print-rows"><option value="grupos">Una fila por categoría</option><option value="equipos">Una fila por equipo</option></select></label>
     <label>Papel <select v-model="paper"><option value="A4">A4 horizontal</option><option value="A3">A3 horizontal</option></select></label>
     <label><input v-model="fit" type="checkbox" /> Ajustar a una hoja</label>
     <span v-if="fit && scale < 1" class="hint">Escala {{ Math.round(scale * 100) }} %</span>
