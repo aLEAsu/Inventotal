@@ -607,10 +607,8 @@ export class PlansService {
       const p = a.program;
       if (p.targetType === 'GRUPO') return { key: `p:${p.id}`, name: p.group?.name ?? p.name, type: 'Grupo personalizado' };
       if (p.targetType === 'SUBCATEGORIA') return { key: `p:${p.id}`, name: p.subcategory?.name ?? p.name, type: 'Subcategoría' };
-      if (p.targetType === 'CATEGORIA') {
-        const names = [p.category?.name, ...p.extraCategories.map((x) => x.category.name)].filter(Boolean);
-        return { key: `p:${p.id}`, name: names.join(' + ') || p.name, type: names.length > 1 ? 'Categorías' : 'Categoría' };
-      }
+      // Un programa con varias categorías muestra una fila por cada categoría (mismo programa y periodicidad)
+      if (p.targetType === 'CATEGORIA') return { key: `p:${p.id}|c:${a.asset.category.id}`, name: a.asset.category.name, type: 'Categoría' };
       const snap = a.programSnapshot as Record<string, string | undefined>;
       const sub = a.asset.subcategory;
       return {
@@ -679,7 +677,10 @@ export class PlansService {
       });
       return r;
     });
-    result.sort((p, q) => p.targetName.localeCompare(q.targetName, 'es') || p.programName.localeCompare(q.programName, 'es') || p.assetCode.localeCompare(q.assetCode));
+    // Por grupos: las filas de un mismo programa quedan juntas (una por categoría); por equipo: orden por categoría/equipo
+    result.sort((p, q) => view === 'grupos'
+      ? p.programName.localeCompare(q.programName, 'es') || p.programCode.localeCompare(q.programCode) || p.targetName.localeCompare(q.targetName, 'es')
+      : p.targetName.localeCompare(q.targetName, 'es') || p.programName.localeCompare(q.programName, 'es') || p.assetCode.localeCompare(q.assetCode));
 
     const monthTotals = Array.from({ length: 12 }, (_, i) => ({
       total: result.reduce((s, r) => s + r.months[i].reduce((c, x) => c + x.count, 0), 0),

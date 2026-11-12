@@ -361,7 +361,7 @@ describe('4-6. Programas preventivos y generación del cronograma', () => {
     expect(p.status).toBe(201);
   });
 
-  it('un programa puede abarcar varias categorías y el cronograma lo muestra como un solo grupo', async () => {
+  it('un programa puede abarcar varias categorías y el cronograma muestra una fila por categoría', async () => {
     const cats = ((await c.coord.get('/categories')).body as { id: string; name: string; assetCount: number }[]).filter((x) => x.assetCount > 0);
     expect(cats.length).toBeGreaterThanOrEqual(2);
     const [a, b] = cats;
@@ -379,8 +379,10 @@ describe('4-6. Programas preventivos y generación del cronograma', () => {
     const g = await c.coord.post(`/plans/${YEAR}/generate`, { scheduleType: 'PREVENTIVO' });
     expect(g.status).toBe(201);
     const m = await c.coord.get(`/plans/${YEAR}/matrix?scheduleType=PREVENTIVO`);
-    const row = (m.body.rows as { programId: string; targetName: string; assetCount: number; groupType: string }[]).find((r) => r.programId === p.body.id)!;
-    expect(row).toMatchObject({ targetName: `${a.name} + ${b.name}`, groupType: 'Categorías', assetCount: a.assetCount + b.assetCount });
+    const rows = (m.body.rows as { programId: string; targetName: string; assetCount: number; groupType: string; programName: string }[]).filter((r) => r.programId === p.body.id);
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.targetName === a.name)).toMatchObject({ groupType: 'Categoría', assetCount: a.assetCount, programName: 'Limpieza conjunta de cómputo y periféricos' });
+    expect(rows.find((r) => r.targetName === b.name)).toMatchObject({ groupType: 'Categoría', assetCount: b.assetCount });
 
     // No se puede cambiar el alcance de un programa que ya tiene actividades
     const change = await c.coord.patch(`/programs/${p.body.id}`, { categoryIds: [a.id] });
