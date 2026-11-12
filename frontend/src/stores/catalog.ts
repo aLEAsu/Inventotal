@@ -10,7 +10,8 @@ export interface Category extends Opt {
   code: string;
   color: string | null;
   isActive: boolean;
-  subcategories: (Opt & { categoryId: string; isActive: boolean })[];
+  assetCount?: number;
+  subcategories: (Opt & { categoryId: string; isActive: boolean; assetCount?: number })[];
 }
 export interface UserOpt {
   id: string;

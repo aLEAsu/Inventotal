@@ -6,6 +6,7 @@
  */
 import 'dotenv/config';
 import { PrismaPg } from '@prisma/adapter-pg';
+import { poolConfig } from '../src/common/prisma.service';
 import { PrismaClient } from '../src/generated/prisma/client';
 import { PERMISSIONS, ROLES } from '../src/common/permissions';
 import { DEFAULT_SETTINGS } from '../src/common/settings.service';
@@ -57,7 +58,7 @@ export async function seedBase(prisma: PrismaClient) {
 }
 
 async function main() {
-  const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL! }) });
+  const prisma = new PrismaClient({ adapter: new PrismaPg(poolConfig(process.env.DATABASE_URL!) as never) });
   try {
     await seedBase(prisma);
     console.log('Semilla base aplicada correctamente.');

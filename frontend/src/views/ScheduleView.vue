@@ -30,6 +30,15 @@ const viewOptions = [{ label: 'Por grupos', value: 'grupos', icon: 'pi pi-th-lar
 const typeLabel = computed(() => (scheduleType.value === 'CORRECTIVO' ? 'correctivo' : 'preventivo'));
 type MatrixData = { rows: Record<string, any>[]; today: string; total: number; executed: number; assetCount: number; monthTotals: { total: number; executed: number }[] };
 const matrix = ref<MatrixData | null>(null);
+type Coverage = { planExists: boolean; activePrograms: number; applicablePrograms: number; activities: number; laterStartYears: number[]; endedBeforeYears: number[]; needsGeneration: boolean };
+const coverage = ref<Coverage | null>(null);
+async function loadCoverage() {
+  try {
+    coverage.value = (await http.get(`/plans/${year.value}/coverage`, { params: { scheduleType: scheduleType.value } })).data;
+  } catch {
+    coverage.value = null;
+  }
+}
 const detail = ref<{ items: Record<string, any>[]; total: number }>({ items: [], total: 0 });
 const summary = ref<Record<string, any> | null>(null);
 const history = ref<Record<string, any> | null>(null);
@@ -44,6 +53,7 @@ async function loadPlan() {
   plan.value = (await http.get(`/plans/${year.value}`)).data.plan;
 }
 async function loadData() {
+  void loadCoverage();
   if (!plan.value) {
     matrix.value = null;
     detail.value = { items: [], total: 0 };
@@ -178,6 +188,41 @@ function matrixCellTitle(cell: Record<string, any>, grouped: boolean) {
 }
 const currentMonth = computed(() => (matrix.value?.today && Number(matrix.value.today.slice(0, 4)) === year.value ? Number(matrix.value.today.slice(5, 7)) - 1 : -1));
 const pct = (a: number, b: number) => (b ? Math.round((a / b) * 100) : 0);
+/** Explica por qué el cronograma del año seleccionado está vacío y ofrece la acción que lo resuelve */
+const coverageHint = computed(() => {
+  const c = coverage.value;
+  if (!c) return null;
+  const t = typeLabel.value;
+  if (c.activePrograms === 0) return { severity: 'info', text: `No hay programas de mantenimiento ${t} definidos en el plan maestro.`, action: 'plan' as const };
+  if (c.applicablePrograms === 0 && c.laterStartYears.length) {
+    const y = c.laterStartYears[0];
+    return { severity: 'warn', text: `Tus programas ${t}s inician en ${c.laterStartYears.join(', ')} y estás viendo el año ${year.value}. Este año no tiene programas vigentes.`, action: 'year' as const, year: y };
+  }
+  if (c.applicablePrograms === 0 && c.endedBeforeYears.length) return { severity: 'warn', text: `Los programas ${t}s terminaron su vigencia en ${c.endedBeforeYears.join(', ')}. Amplíe la fecha de fin en el plan maestro.`, action: 'plan' as const };
+  if (c.needsGeneration) return { severity: 'info', text: `Hay ${c.applicablePrograms} programa(s) ${t}(s) vigentes para ${year.value} sin actividades en el cronograma.`, action: c.planExists ? ('generate' as const) : ('create' as const) };
+  return null;
+});
+async function resolveHint() {
+  const h = coverageHint.value;
+  if (!h) return;
+  if (h.action === 'plan') await router.push(`/plan-maestro?tipo=${scheduleType.value}`);
+  else if (h.action === 'year' && h.year) goToYear(h.year);
+  else if (h.action === 'create') {
+    await createPlan();
+    if (plan.value) await generate();
+  } else if (h.action === 'generate') await generate();
+}
+const hintLabel = computed(() => ({ plan: 'Ir al plan maestro', year: `Ver cronograma ${coverageHint.value?.year}`, create: `Crear plan ${year.value} y generar`, generate: `Generar cronograma ${typeLabel.value}` })[coverageHint.value?.action ?? 'plan']);
+const EXCLUDED_REASON: Record<string, (x: { year?: number }) => string> = {
+  INACTIVO: () => 'programa inactivo',
+  INICIA_DESPUES: (x) => `inicia en ${x.year}`,
+  VENCIDO: (x) => `vigencia terminada en ${x.year}`,
+  SIN_EQUIPOS: () => 'su grupo no tiene equipos habilitados',
+};
+function goToYear(y: number) {
+  genResult.value = null;
+  year.value = y;
+}
 async function createWo() {
   const r = await n.run(() => http.post(`/workorders/from-activity/${act.value!.id}`, {}), 'Orden de trabajo creada');
   if (r) await router.push(`/ordenes/${r.data.id}`);
@@ -275,6 +320,14 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
         </template>
       </div>
     </div>
+
+    <Message v-if="coverageHint && auth.can('plans.read')" :severity="coverageHint.severity" :closable="false" class="mb hint-banner" data-testid="coverage-hint">
+      <div class="row">
+        <span>{{ coverageHint.text }}</span>
+        <span class="spacer" />
+        <Button v-if="coverageHint.action !== 'generate' && coverageHint.action !== 'create' || auth.can('plans.generate')" :label="hintLabel" size="small" :icon="coverageHint.action === 'year' ? 'pi pi-arrow-right' : coverageHint.action === 'plan' ? 'pi pi-list' : 'pi pi-bolt'" icon-pos="right" data-testid="coverage-action" @click="resolveHint" />
+      </div>
+    </Message>
 
     <template v-if="plan">
       <div class="filters">
@@ -468,8 +521,13 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
         </div>
         <p class="muted">Programas evaluados: {{ genResult.programsEvaluated }}. La generación es idempotente: repetirla no duplica actividades.</p>
         <Message v-if="genResult.programsEvaluated === 0 && genResult.eligibilityDiagnostics" severity="warn" :closable="false">
-          <p>No hay programas elegibles para {{ genResult.year }}. «Programa vigente» solo indica que está activo; además, las fechas de vigencia deben cruzar el año y el equipo no puede estar retirado ni dado de baja.</p>
-          <ul class="mb">
+          <p>No hay programas {{ typeLabel }}s elegibles para {{ genResult.year }}.</p>
+          <ul v-if="genResult.eligibilityDiagnostics.excludedPrograms?.length" class="mb">
+            <li v-for="x in genResult.eligibilityDiagnostics.excludedPrograms" :key="x.code"><strong>{{ x.code }}</strong> {{ x.name }}: {{ EXCLUDED_REASON[x.reason]?.(x) ?? x.reason }}</li>
+          </ul>
+          <Button v-if="genResult.eligibilityDiagnostics.suggestedYear" class="mb" :label="`Ir al cronograma ${genResult.eligibilityDiagnostics.suggestedYear}`" icon="pi pi-arrow-right" icon-pos="right" size="small" @click="goToYear(genResult.eligibilityDiagnostics.suggestedYear)" />
+          <p class="muted">Para que un programa genere actividades debe estar vigente, su vigencia debe cruzar el año y su grupo debe tener equipos habilitados.</p>
+          <ul v-if="!genResult.eligibilityDiagnostics.excludedPrograms?.length" class="mb">
             <li>Programas inactivos: {{ genResult.eligibilityDiagnostics.inactivePrograms }}</li>
             <li>Asociados a equipos retirados o dados de baja: {{ genResult.eligibilityDiagnostics.inactiveAssets }}</li>
             <li>Agrupaciones sin equipos habilitados: {{ genResult.eligibilityDiagnostics.noEligibleAssets }}</li>
@@ -551,6 +609,7 @@ const assetLabel = (a: { code: string; name: string }) => `${a.code} · ${a.name
 </template>
 
 <style scoped>
+.hint-banner :deep(.p-message-text) { width: 100%; }
 .type-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .type-bar :deep(.p-togglebutton-content) { gap: 6px; }
 .small { font-size: 0.8rem; }

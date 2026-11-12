@@ -7,6 +7,7 @@ import { Ctx, Perms } from '../../common/decorators';
 import { PrismaService } from '../../common/prisma.service';
 import { DEFAULT_SETTINGS, SettingsService } from '../../common/settings.service';
 import { ApiZBody, zOptText, zOptUuid, ZBody } from '../../common/zod';
+import { INACTIVE_STATUSES } from '../assets/assets.service';
 
 const code = z.string().trim().toUpperCase().regex(/^[A-Z0-9._-]{1,20}$/, 'Código: 1-20 caracteres (A-Z, 0-9, . _ -)');
 const AreaSchema = z.object({ code, name: z.string().trim().min(2).max(120), description: zOptText(500), isActive: z.boolean().default(true) });
@@ -39,8 +40,17 @@ export class CatalogController {
     return this.prisma.location.findMany({ include: { area: { select: { id: true, name: true } } }, orderBy: { name: 'asc' } });
   }
   @Get('categories')
-  categories() {
-    return this.prisma.assetCategory.findMany({ include: { subcategories: { orderBy: { name: 'asc' } } }, orderBy: { name: 'asc' } });
+  async categories() {
+    // assetCount: equipos habilitados (no retirados ni dados de baja), útil para definir programas por grupo
+    const active = { where: { status: { notIn: INACTIVE_STATUSES } } };
+    const rows = await this.prisma.assetCategory.findMany({
+      include: { _count: { select: { assets: active } }, subcategories: { orderBy: { name: 'asc' }, include: { _count: { select: { assets: active } } } } },
+      orderBy: { name: 'asc' },
+    });
+    return rows.map(({ _count, subcategories, ...c }) => ({
+      ...c, assetCount: _count.assets,
+      subcategories: subcategories.map(({ _count: sc, ...s }) => ({ ...s, assetCount: sc.assets })),
+    }));
   }
 
   /** Parámetros públicos de identidad institucional (para encabezados) */

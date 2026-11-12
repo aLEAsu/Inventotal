@@ -7,6 +7,7 @@
  */
 import 'dotenv/config';
 import { PrismaPg } from '@prisma/adapter-pg';
+import { poolConfig } from '../src/common/prisma.service';
 import { randomBytes } from 'node:crypto';
 import { PrismaClient } from '../src/generated/prisma/client';
 import { hashPassword, validatePasswordPolicy } from '../src/modules/auth/auth.service';
@@ -17,7 +18,7 @@ function strongPassword() {
 }
 
 async function main() {
-  const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL! }) });
+  const prisma = new PrismaClient({ adapter: new PrismaPg(poolConfig(process.env.DATABASE_URL!) as never) });
   try {
     const username = (process.env.ADMIN_USERNAME ?? 'admin').trim().toLowerCase();
     const fullName = process.env.ADMIN_FULLNAME ?? 'Administrador del sistema';

@@ -16,6 +16,7 @@
 import 'dotenv/config';
 import ExcelJS from 'exceljs';
 import { PrismaPg } from '@prisma/adapter-pg';
+import { poolConfig } from '../src/common/prisma.service';
 import { basename } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { PrismaClient } from '../src/generated/prisma/client';
@@ -164,7 +165,7 @@ async function main() {
   const marker = (r: Row) => `[IMPORT ${formatCode} ${source} fila ${r.rowNo}]`;
 
   // Seriales ya registrados en la base (otras sedes / cargas previas): se advierten, no se bloquean
-  const ro = new PrismaClient({ adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL! }) });
+  const ro = new PrismaClient({ adapter: new PrismaPg(poolConfig(process.env.DATABASE_URL!) as never) });
   try {
     const serials = included.filter((r) => r.serie).map((r) => r.serie!);
     const existing = await ro.asset.findMany({ where: { serialNumber: { in: serials } }, select: { code: true, serialNumber: true, notes: true } });
@@ -178,7 +179,7 @@ async function main() {
 
   let result: { created: number; skipped: number; areas: number; locations: number } | undefined;
   if (!dry) {
-    const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL! }) });
+    const prisma = new PrismaClient({ adapter: new PrismaPg(poolConfig(process.env.DATABASE_URL!) as never) });
     try {
       const admin = await prisma.user.findUnique({ where: { username: adminName } });
       if (!admin) throw new Error(`No existe el usuario "${adminName}" (cree el administrador antes de importar)`);

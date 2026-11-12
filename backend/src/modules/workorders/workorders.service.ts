@@ -184,10 +184,12 @@ export class WorkOrdersService {
       const assignee = assignedToId ?? a.responsibleId;
       if (assignee && !can(ctx.user, 'workorders.assign') && assignee !== ctx.user.id) throw new ForbiddenException('No puede asignar órdenes a otros usuarios');
       const code = await this.counters.nextCode(tx, 'OT', currentYearBogota());
+      // El tipo de la orden sigue al cronograma: correctivo planificado → orden correctiva; el resto → preventiva
+      const type: WorkOrderType = a.program.kind === 'CORRECTIVO' ? 'CORRECTIVA' : 'PREVENTIVA';
       const checklist = (a.program.checklist as { id: string; text: string; required: boolean }[]).map((i) => ({ itemId: i.id, text: i.text, required: i.required, result: null, note: null }));
       const w = await tx.workOrder.create({
         data: {
-          code, type: 'PREVENTIVA', assetId: a.assetId, areaId: a.asset.areaId, activityId: a.id,
+          code, type, assetId: a.assetId, areaId: a.asset.areaId, activityId: a.id,
           priority: a.asset.criticality === 'CRITICA' ? 'ALTA' : 'MEDIA',
           status: assignee ? 'ASIGNADA' : 'ABIERTA', title: a.program.name, description: a.program.description,
           interventionType: a.program.kind, scheduledDate: a.committedDate, dueDate: a.committedDate,
@@ -196,7 +198,7 @@ export class WorkOrdersService {
       });
       await this.event(tx, w.id, ctx.user.id, 'CREAR', null, w.status, `Generada desde la actividad programada para ${fmtYmd(a.committedDate)}`);
       // NOTA: generar la orden NO marca la actividad como ejecutada.
-      await this.audit.log(ctx, { action: 'CREAR', module: 'ordenes', entity: 'WorkOrder', entityId: w.id, after: { code, type: 'PREVENTIVA', activityId } }, tx);
+      await this.audit.log(ctx, { action: 'CREAR', module: 'ordenes', entity: 'WorkOrder', entityId: w.id, after: { code, type, activityId } }, tx);
       return w;
     });
   }
@@ -458,8 +460,8 @@ export class WorkOrdersService {
       });
       await this.event(tx, id, ctx.user.id, 'VALIDAR_Y_CERRAR', w.status, 'CERRADA', b.verificationNote);
 
-      // Actividad preventiva
-      if (w.activityId && w.type === 'PREVENTIVA') {
+      // Actividad del cronograma (preventivo o correctivo planificado): queda ejecutada
+      if (w.activityId) {
         const execDate = instantToBogotaDate(w.finishedAt ?? now);
         await tx.scheduledActivity.update({ where: { id: w.activityId }, data: { status: 'EJECUTADO', executedDate: parseYmd(execDate) } });
         const act = await tx.scheduledActivity.findUniqueOrThrow({ where: { id: w.activityId } });

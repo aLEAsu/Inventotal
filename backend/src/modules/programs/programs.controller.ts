@@ -384,12 +384,18 @@ export class ProgramsController {
     return { assetId: null, categoryId: null, subcategoryId: null, groupId: group.id };
   }
 
+  /**
+   * Usuarios con alcance total pueden programar categorías o subcategorías aún sin equipos: el programa
+   * incluirá los que se registren después. Los usuarios limitados a sus áreas solo pueden programar
+   * agrupaciones con al menos un equipo habilitado en esas áreas.
+   */
   private async assertSelectorAccess(ctx: ReqCtx, selector: { categoryId?: string; subcategoryId?: string }, tx: Tx) {
+    if (ctx.user.scope !== 'AREA') return;
     const asset = await tx.asset.findFirst({
       where: { ...areaFilter(ctx.user), ...selector, status: { notIn: INACTIVE_STATUSES } },
       select: { id: true },
     });
-    if (!asset) throw new ForbiddenException('No tiene acceso a activos de esta categoría o subcategoría');
+    if (!asset) throw new ForbiddenException('Sus áreas no tienen equipos habilitados en esta categoría o subcategoría');
   }
 
   private async assertTargetAccess(ctx: ReqCtx, target: ProgramTarget & { targetType: string }) {

@@ -17,7 +17,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   constructor() {
     const url = process.env.DATABASE_URL;
     // Sin URL se usa una dirección inválida: las consultas fallarán con un error claro en vez de tumbar el arranque
-    super({ adapter: new PrismaPg({ connectionString: url || 'postgresql://sin-configurar.invalid:5432/sigm', options: '-c timezone=America/Bogota' } as never) });
+    super({ adapter: new PrismaPg(poolConfig(url || 'postgresql://sin-configurar.invalid:5432/sigm') as never) });
     if (!url) this.connectionProblem = 'DATABASE_URL no está definida';
   }
 
@@ -37,6 +37,35 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   async onModuleDestroy() {
     await this.$disconnect();
   }
+}
+
+/**
+ * Configuración del pool de node-postgres.
+ * - TLS: si la URL no fija sslmode y el host es de Supabase, se cifra siempre la conexión.
+ *   Con DB_SSL_CA (certificado PEM de Supabase) además se verifica el servidor; sin él se cifra sin
+ *   verificar la cadena (la CA de Supabase no está en el almacén de Node y fallaría la conexión).
+ * - Pool acotado (DB_POOL_MAX, 5 por defecto): cada instancia serverless abre su propio pool.
+ */
+export function poolConfig(connectionString: string) {
+  const ca = process.env.DB_SSL_CA?.replace(/\\n/g, '\n');
+  const isSupabase = /\.supabase\.(co|com)(:|\/|$)/.test(connectionString.replace(/^[^@]*@/, ''));
+  const sslMode = /[?&]sslmode=([^&]+)/.exec(connectionString)?.[1];
+  let ssl: { ca?: string; rejectUnauthorized: boolean } | undefined;
+  if (ca) ssl = { ca, rejectUnauthorized: true };
+  else if (isSupabase && (!sslMode || sslMode === 'require' || sslMode === 'prefer')) {
+    // pg interpreta sslmode=require como verificación completa: se quita y se cifra sin verificar la CA
+    connectionString = connectionString.replace(/([?&])sslmode=[^&]*&?/, '$1').replace(/[?&]$/, '');
+    ssl = { rejectUnauthorized: false };
+  }
+  if (ssl?.ca) connectionString = connectionString.replace(/([?&])sslmode=[^&]*&?/, '$1').replace(/[?&]$/, '');
+  return {
+    connectionString,
+    options: '-c timezone=America/Bogota',
+    max: Number(process.env.DB_POOL_MAX ?? 5),
+    idleTimeoutMillis: 10_000,
+    connectionTimeoutMillis: 10_000,
+    ...(ssl ? { ssl } : {}),
+  };
 }
 
 /** Descripción del error sin exponer host, usuario ni contraseña */
